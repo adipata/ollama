@@ -1,18 +1,23 @@
 # Plan: Ollama-compatible proxy in front of vLLM
 
 A small Python service that listens on `http://127.0.0.1:11434` (Ollama's default
-address) and forwards everything to a local vLLM server. Clients that expect
+address) and forwards everything to vLLM running on a Runpod pod, reached through
+an SSH tunnel that the application manages itself. Clients that expect
 Ollama — `ollama-python`/`ollama-js`, Open WebUI, editor plugins, anything
 using the OpenAI SDK against `:11434/v1` — keep working once they are given a
 proxy API key, while inference is actually served by vLLM.
 
 ```
-Ollama client ──► proxy 127.0.0.1:11434 ──► vLLM 127.0.0.1:8000
- (proxy API key)  /api/*   (translated)      /v1/*    (OpenAI API, vLLM key)
-                  /v1/*    (pass-through)    /metrics (sampled)
-                  /admin/* (keys, monitoring)
+                  local machine (Linux/macOS)        │        Runpod pod
+                                                     │
+Ollama client ──► proxy 127.0.0.1:11434 ══ SSH ══════╪══► vLLM 127.0.0.1:8000
+ (proxy API key)  /api/*   (translated)   (managed   │      /v1/*, /metrics, /health
+                  /v1/*    (pass-through)  by the    ├══► GPU helper 127.0.0.1:9400
+                  /admin/* (keys, deploy,  proxy)    │      /metrics, /inventory
+                            monitoring)              └══► remote commands, SFTP, log tail
                       │
-                      └─► SQLite (API keys, request metadata, engine and GPU samples)
+                      └─► SQLite (API keys, pod and profiles, request metadata,
+                                  engine and GPU samples)
 ```
 
 Callers must present an API key issued by the proxy. Keys are created in a
@@ -20,7 +25,16 @@ management web interface, which also hosts a live monitoring page and a
 downloadable session report modelled on the one in
 `adipata/confidential-inference-test` (`proxy/perfproxy`).
 
+The same interface deploys the backend: after you start a pod from the
+`vllm/vllm-openai:latest` template in the Runpod console and enter its SSH
+address, a **Deploy** button downloads the model, installs the monitoring
+helper, starts vLLM and shows the progress and the vLLM log.
+
 ## 1. Target backend (given)
+
+vLLM runs in a Runpod pod started by hand from the `vllm/vllm-openai:latest`
+template. The proxy starts it there (section 12) with the command of the
+selected deployment profile; the default profile is:
 
 ```bash
 vllm serve /workspace/qwen3.8-27b-fp8 \
@@ -33,6 +47,9 @@ vllm serve /workspace/qwen3.8-27b-fp8 \
   --api-key "$VLLM_API_KEY"
 ```
 
+At deploy time the key is passed through the `VLLM_API_KEY` environment
+variable rather than `--api-key`, so it stays off the command line.
+
 What this implies for the proxy:
 
 | Backend fact | Consequence |
@@ -44,6 +61,8 @@ What this implies for the proxy:
 | `--reasoning-parser qwen3` | Reasoning arrives in a separate field and maps to Ollama's `thinking` |
 | `--enable-prefix-caching` | Proxy must keep message/prompt prefixes byte-stable (no reordering, no injected timestamps) to preserve cache hits |
 | No embedding model | `/api/embed` and `/v1/embeddings` are unsupported unless a second backend is configured |
+| vLLM binds `127.0.0.1` inside the pod | Nothing is exposed on Runpod's public ports except SSH; all traffic goes through the tunnel |
+| Pod IP, SSH port and host key change with every rental | Connection details are entered in the management interface, not in config files |
 
 ## 2. Goals and non-goals
 
@@ -56,7 +75,10 @@ What this implies for the proxy:
   interface.
 - Monitoring: a live page plus a self-contained downloadable report covering
   requests, the vLLM engine and the GPUs.
-- Single process, one SQLite file, minimal dependencies.
+- One-click deployment of vLLM onto a running Runpod pod, with a managed SSH
+  tunnel, live progress and log view.
+- Single process, one SQLite file, minimal dependencies. Runs natively on
+  Linux and macOS.
 
 **Non-goals**
 
@@ -64,6 +86,10 @@ What this implies for the proxy:
   model; these endpoints are stubbed so clients do not break.
 - Loading/unloading models, `keep_alive` semantics, multi-model scheduling.
 - Reproducing Ollama's prompt templating (`template`, `raw` Modelfile logic).
+- Creating, stopping or terminating Runpod pods. You do that in the Runpod
+  console; the application never talks to the Runpod API and holds no Runpod
+  credentials.
+- Windows and Docker packaging.
 - Per-key expiry, rate limits, quotas or usage billing. A key has a name and
   can be disabled or revoked; nothing more.
 - Admin user accounts. One admin token protects the management interface.
@@ -84,6 +110,9 @@ against a local server. The OpenAI SDK (`api_key=`), `ollama-python` /
 - **pydantic v2** models for Ollama request/response shapes, with unknown fields
   allowed so newer clients are not rejected.
 - **sqlite3** from the standard library (no ORM), WAL mode.
+- **asyncssh** for the pod connection: remote commands, SFTP upload, local port
+  forwards and log tailing over one multiplexed connection, in-process, with
+  explicit host-key handling.
 - Management and monitoring pages: static HTML with inline CSS/JS and inline
   SVG charts, served by the proxy. No build step, no external assets.
 - Tests: `pytest`, `pytest-asyncio`, `respx` (mock vLLM).
@@ -96,21 +125,25 @@ Environment variables (optionally a `.env` file); no secrets in the repo.
 |---|---|---|
 | `PROXY_HOST` | `127.0.0.1` | Listen address |
 | `PROXY_PORT` | `11434` | Listen port |
-| `VLLM_BASE_URL` | `http://127.0.0.1:8000` | Upstream |
-| `VLLM_API_KEY` | — (required) | Bearer token sent upstream; never logged |
-| `DEFAULT_MODEL` | first id from upstream `/v1/models` | Model used when a name does not resolve |
+| `VLLM_BASE_URL` | empty | Set only for *external mode*: use an already running vLLM at this URL and disable pod management |
+| `VLLM_API_KEY` | empty | External mode only. In managed mode the key is generated at deploy time (section 12) |
+| `SSH_KEY_PATH` | `~/.ssh/id_ed25519` | Default private key offered in the pod form; the key file is read, never copied |
+| `DEFAULT_MODEL` | served name of the active profile | Model used when a name does not resolve |
 | `MODEL_ALIASES` | empty | `alias=served-name,...`, e.g. `qwen3:latest=dev-test` |
 | `STRICT_MODELS` | `false` | `true`: unknown model → 404 (Ollama behaviour). `false`: fall back to `DEFAULT_MODEL` |
-| `CONTEXT_LENGTH` | `65536` | Reported by `/api/show`; should equal `--max-model-len` |
+| `CONTEXT_LENGTH` | from the active profile | Reported by `/api/show`; override only in external mode |
 | `OLLAMA_VERSION` | `0.12.0` | Value returned by `/api/version` (clients gate features on it) |
 | `ALLOWED_ORIGINS` | localhost origins | CORS, mirroring `OLLAMA_ORIGINS` |
 | `LOG_LEVEL` | `info` | Logging; bodies only logged at `debug` |
 | `DATA_DIR` | `./data` | Holds `proxy.sqlite3` and `admin_token.txt` |
 | `ADMIN_TOKEN` | generated at first start | Overrides the token file; protects `/admin/*` |
 | `SAMPLE_INTERVAL_S` | `1.5` | Interval for scraping vLLM `/metrics` and the GPUs |
-| `GPU_SOURCE` | `nvidia-smi` | `nvidia-smi` (local, vLLM runs on the same host), an exporter URL, or `off` |
-| `VLLM_LOG_PATH` | empty | Optional vLLM log file, parsed for startup lines shown in the report |
+| `GPU_EXPORTER_URL` | empty | External mode only: URL of a GPU helper, or `off`. In managed mode the helper is installed on the pod and reached through the tunnel |
 | `RETENTION_DAYS` | `30` | Samples and request rows older than this are pruned; `0` keeps everything |
+
+Pod address, deployment profiles and the generated vLLM key are not
+environment settings; they are entered in the management interface and stored
+in SQLite.
 
 Model name resolution, applied to every request: strip a trailing `:latest`,
 apply `MODEL_ALIASES`, compare with upstream model ids, then apply the
@@ -246,6 +279,9 @@ NDJSON (`application/x-ndjson`, one JSON object per line).
   (what Ollama clients expect mid-stream).
 - vLLM unreachable → `502`; vLLM still loading (`/health` not ready) → `503`.
   The proxy starts and stays up regardless of vLLM state.
+- No pod connected, tunnel down or nothing deployed → `503` with a message that
+  names the state (for example `backend not deployed`), so a client-side error
+  points at the management page rather than looking like a model failure.
 
 ### 6.5 `/api/generate`
 
@@ -263,9 +299,10 @@ NDJSON (`application/x-ndjson`, one JSON object per line).
 
 ## 7. Cross-cutting concerns
 
-- **Security**: bind to loopback only by default; the vLLM key lives only in the
-  environment, is attached only to upstream requests, and is redacted from logs
-  and error messages. Proxy keys and the admin token are never logged either.
+- **Security**: bind to loopback only by default; the vLLM key is generated at
+  deploy time, stored only in the local database and in a `0600` file on the
+  pod, attached only to upstream requests, and redacted from logs and error
+  messages. Proxy keys and the admin token are never logged either.
 - **CORS**: same defaults as Ollama (localhost, `127.0.0.1`, `app://`,
   `vscode-webview://` etc.), configurable.
 - **Concurrency**: fully async; no proxy-side queue — vLLM's continuous batching
@@ -301,7 +338,16 @@ One file, `DATA_DIR/proxy.sqlite3`, opened in WAL mode with
 | `requests` | One row per proxied inference request (below) |
 | `engine_samples` | `ts`, `name`, `labels`, `value` — `vllm:*` series from `/metrics`, `gpu:*` series, `proxy:open_requests` |
 | `inventory` | `ts`, `kind`, `data` (JSON) — GPU identities and limits, driver/CUDA, vLLM version and cache config, vLLM startup lines; a row is written only when the content changes |
+| `pod` | The current pod connection: SSH host, port, user, key path, pinned host-key fingerprint, last connection state |
+| `profiles` | Deployment profiles (section 12.2) |
+| `deployments` | One row per Deploy click: profile snapshot, start/end time, final state, and per-step status with timestamps |
+| `secrets` | The generated vLLM API key and optional Hugging Face token (see below) |
 | `state` | Key/value settings such as the admin token hash and counters for rejected requests |
+
+The vLLM key and the Hugging Face token must be usable in clear text, so they
+cannot be hashed like API keys. The database file and `DATA_DIR` are created
+with mode `0600`/`0700`, these two values are never returned by any endpoint
+and never logged, and the SSH private key is not stored at all — only its path.
 
 `requests` columns:
 
@@ -360,6 +406,7 @@ key and API keys are not valid on `/admin/*`.
 | Page | Purpose |
 |---|---|
 | `GET /admin` | API keys: list (name, prefix, created, status), create, rename, enable/disable, revoke. After creation the key is displayed once with a copy button and a ready-to-paste client snippet |
+| `GET /admin/pod` | Pod connection, deployment profiles, Deploy / Stop / Restart, progress and logs (section 12) |
 | `GET /admin/monitor` | Live monitoring page (section 11) |
 
 **Admin API**
@@ -405,17 +452,20 @@ scoped by time range instead of by run.
   preemptions) plus `proxy:open_requests`. Histogram `_bucket` series are
   dropped, and the `model_name` label is stripped because it contains the
   weights path.
-- **GPU sampler**: because vLLM runs on the same host, the proxy runs
-  `nvidia-smi --query-gpu ... -lms` and `nvidia-smi dmon -s t` as long-lived
-  child processes and parses their output (logic taken from
-  `pod/gpu_exporter.py`): utilization, memory used/total, power and power
-  limit, temperature, SM clock, PCIe RX/TX. `GPU_SOURCE` can instead point at a
-  remote exporter URL or be `off`; without GPU data the GPU sections are simply
-  omitted.
-- **Inventory**: GPU names, memory, ECC, power limit, PCIe max, max SM clock,
-  bus ID, VBIOS, driver and CUDA versions, `nvidia-smi topo -m`, vLLM
-  `/version` and `vllm:cache_config_info`, and, when `VLLM_LOG_PATH` is set, the
-  vLLM startup lines with key-like arguments redacted.
+- **GPU helper on the pod**: `gpu_exporter.py`, vendored from
+  `confidential-inference-test/pod/` (standard library only), is uploaded and
+  started by Deploy (section 12) and listens on `127.0.0.1:9400` inside the
+  pod. It runs `nvidia-smi --query-gpu ... -lms` and `nvidia-smi dmon -s t` as
+  long-lived child processes and serves `/metrics` (per-GPU utilization,
+  memory used/total, power and power limit, temperature, SM clock, PCIe RX/TX)
+  and `/inventory`. The proxy scrapes it through the tunnel on every sample and
+  stores the values as `gpu:*` series. If the helper is not running, the GPU
+  sections are omitted and everything else keeps working.
+- **Inventory**: from the helper — GPU names, memory, ECC, power limit, PCIe
+  max, max SM clock, bus ID, VBIOS, driver and CUDA versions,
+  `nvidia-smi topo -m`, host CPU/RAM and the vLLM startup lines parsed from
+  `/workspace/vllm.log` with key-like arguments redacted; from vLLM —
+  `/version` and `vllm:cache_config_info`. Fetched every 30 s.
 - A small in-memory ring (about 25 minutes of samples, last 2,000 requests)
   serves the live page cheaply; longer windows are read from SQLite.
 
@@ -449,7 +499,135 @@ key or session, saved as one self-contained file.
 - Engine and GPU charts are engine-wide: a report filtered to one key still
   shows the load caused by all keys.
 
-## 12. Project layout
+## 12. Pod deployment (Runpod)
+
+### 12.1 What you do, and what the application does
+
+You:
+
+1. Start a pod from the `vllm/vllm-openai:latest` template in the Runpod
+   console, with your public SSH key on the account and TCP port 22 exposed.
+2. Copy the address from **Connect → SSH over exposed TCP** into the **Pod**
+   page: host, port, user (`root`) and the private key path.
+3. Click **Connect**, confirm the host-key fingerprint, pick a profile and
+   click **Deploy**.
+4. Terminate the pod in the Runpod console when you are done. The application
+   cannot do this, and the page says so whenever a pod is connected: stopping
+   vLLM does not stop the billing.
+
+The application does everything else: SSH connection, tunnel, model download,
+helper installation, starting vLLM, readiness detection and log display.
+
+### 12.2 Deployment profiles
+
+Stored in SQLite and edited in the UI. A profile is structured, not a free-form
+command, so the proxy always knows the model name and context length.
+
+| Field | Default profile (`qwen3.8-27b-fp8`) |
+|---|---|
+| Hugging Face repo, optional revision | `Qwen/Qwen3.8-27B-FP8` |
+| Local directory | `/workspace/qwen3.8-27b-fp8` |
+| Served model name | `dev-test` |
+| Max model length | `65536` |
+| Extra vLLM arguments (ordered flag/value list) | `--kv-cache-dtype fp8`, `--enable-prefix-caching`, `--enable-auto-tool-choice`, `--tool-call-parser qwen3_coder`, `--reasoning-parser qwen3` |
+| Extra environment variables | none |
+| Needs Hugging Face token | no |
+
+`--host 127.0.0.1`, `--port 8000`, `--served-model-name`, `--max-model-len` and
+the API key are always set by the application and cannot be overridden through
+the extra arguments, so a profile can never expose vLLM on a public interface
+or run it without a key. Profiles can be created, duplicated, edited and
+deleted; the page shows the exact command a profile will run before you deploy
+it. Each deployment stores a snapshot of the profile it used.
+
+### 12.3 SSH connection and tunnel
+
+- One asyncssh connection per pod, key-based only, with keepalives
+  (15 s interval, 3 misses) and automatic reconnect with backoff. A
+  passphrase-protected key is used through `ssh-agent`; the application never
+  asks for or stores a passphrase.
+- **Host key**: on first connect the page shows the pod's host-key fingerprint
+  and requires confirmation; it is then pinned for that host and port. A changed
+  key blocks the connection with an explicit warning until re-confirmed. Host
+  keys are never accepted silently.
+- **Port forwards** inside the same connection: a local ephemeral loopback
+  port → pod `127.0.0.1:8000` (vLLM) and another → pod `127.0.0.1:9400` (GPU
+  helper). The proxy's upstream URL is derived from these, so nothing listens
+  on local port 8000 and your manual `ssh -N -L` command is no longer needed.
+- A dropped connection does not affect what runs on the pod. The proxy returns
+  `503` until the tunnel is back, then resumes without a redeploy.
+
+### 12.4 What Deploy does
+
+Deploy is a sequence of steps. Each has a status (pending, running, done,
+skipped, failed), timestamps and its own output, all visible on the page and
+recorded in `deployments`.
+
+| # | Step | Detail |
+|---|---|---|
+| 1 | Connect | Open or reuse the SSH connection, verify the pinned host key |
+| 2 | Preflight | `nvidia-smi` (GPUs and memory), free space under `/workspace` against the model size, `python3`, `vllm --version`, the `hf` CLI, whether something already listens on port 8000. Problems stop the deployment here with a specific message |
+| 3 | Install helper | Upload `gpu_exporter.py` and the launcher scripts by SFTP to `/workspace/ovp/`, start the helper on `127.0.0.1:9400`, check its `/healthz` through the tunnel |
+| 4 | Download model | `hf download <repo> --local-dir <dir>`; resumable, and near-instant when the files are already present. Progress is the downloaded size against the repo size |
+| 5 | Write secrets | Generate a fresh vLLM API key locally, write it (and the Hugging Face token if the profile needs one) to `/workspace/ovp/vllm.env`, mode `0600` |
+| 6 | Start vLLM | `vllm serve <dir> ...` from the profile, output to `/workspace/vllm.log` |
+| 7 | Wait until ready | Poll `/health` through the tunnel while streaming the log; fail at once, showing the last log lines, if the process exits |
+| 8 | Activate | Read `/v1/models`, check the served name and max model length against the profile, switch the proxy to this backend |
+
+Implementation rules:
+
+- **Long-running remote processes are detached** (`setsid nohup`, PID file and
+  log file under `/workspace/ovp/`), so the download and vLLM survive an SSH
+  drop or a proxy restart. On reconnect or restart the application reads the
+  PID files and logs and resumes the deployment from the step it was in rather
+  than starting over.
+- **No secret on a command line**: the vLLM key reaches the process through the
+  environment file (`VLLM_API_KEY`), not `--api-key`, so it does not appear in
+  `ps` output or in the log's argument dump.
+- **No shell injection**: remote commands are built from argument lists with
+  `shlex.quote`; profile values are never interpolated into shell text. Repo,
+  path and model-name fields are validated against strict patterns.
+- **Idempotent**: clicking Deploy again with the same profile skips finished
+  work (helper running, model present) and restarts vLLM only if it is not
+  healthy. Deploying a different profile stops the running vLLM first, after a
+  confirmation that states in-flight requests will be cut.
+- **One deployment at a time**; the button is disabled while one is running,
+  and a **Cancel** button stops the current step and kills the remote process
+  it started.
+
+Other actions on the page: **Stop vLLM**, **Restart vLLM** (same profile, no
+download), **Disconnect** (closes SSH, leaves the pod running) and
+**Delete model files** (frees `/workspace` space; asks for confirmation).
+
+### 12.5 Progress and logs
+
+- A state line for the backend: `no pod` → `connected` → `deploying (step)` →
+  `ready`, or `failed (step)`, `tunnel down`, `stopped`. The same state drives
+  the `503` messages of the inference endpoints and a status tile on the
+  monitoring page.
+- The step list with live status, and a progress bar for the download.
+- A log panel with a source switch: **vLLM** (`/workspace/vllm.log`),
+  **download**, **GPU helper**. It loads the last 500 lines and then follows the
+  file (`tail -F` over an SSH channel, relayed to the browser as server-sent
+  events), with pause, auto-scroll and a download-full-log link. Key-like
+  values are redacted before display; logs are relayed, not stored in SQLite.
+
+**Admin API additions** (admin token required)
+
+| Endpoint | Purpose |
+|---|---|
+| `GET/PUT /admin/api/pod` | Read or set SSH host, port, user, key path |
+| `POST /admin/api/pod/connect` `{"accept_fingerprint"?}` | Connect; returns the fingerprint to confirm on first use |
+| `POST /admin/api/pod/disconnect` | Close the SSH connection |
+| `GET/POST /admin/api/profiles`, `PUT/DELETE /admin/api/profiles/{id}` | Profile CRUD |
+| `POST /admin/api/deploy` `{"profile_id"}` | Start a deployment |
+| `POST /admin/api/deploy/cancel` | Cancel the running deployment |
+| `POST /admin/api/vllm/stop`, `POST /admin/api/vllm/restart` | Stop or restart vLLM |
+| `GET /admin/api/deploy/status` | Backend state, current deployment and step statuses |
+| `GET /admin/api/deploy/events` (SSE) | Live state and step updates |
+| `GET /admin/api/logs/stream?source=vllm\|download\|helper` (SSE) | Live log tail |
+
+## 13. Project layout
 
 ```
 pyproject.toml              # uv project, entry point `ollama-vllm-proxy`
@@ -462,7 +640,15 @@ src/ollama_vllm_proxy/
   keys.py                   # key generation, hashing, CRUD
   observe.py                # per-request record: timings, usage, outcome
   sampler.py                # vLLM /metrics scraper, inventory collection
-  gpu.py                    # nvidia-smi readers and parsers
+  pod/
+    ssh.py                  # asyncssh connection, host-key pinning, reconnect, port forwards
+    profiles.py             # profile model, validation, command builder
+    deploy.py               # deployment state machine, steps, resume
+    logs.py                 # remote tail → SSE, redaction
+    remote/                 # files uploaded to the pod
+      gpu_exporter.py       # vendored from confidential-inference-test/pod
+      start_vllm.sh         # detached launcher: env file, PID file, log file
+      start_download.sh
   live.py                   # in-memory ring and live snapshot
   export.py                 # report data set, SVG charts, self-contained HTML
   config.py                 # settings from env
@@ -476,9 +662,11 @@ src/ollama_vllm_proxy/
     generate.py             # /api/generate
     embed.py                # /api/embed, /api/embeddings
     registry.py             # /api/tags, /api/ps, /api/show, pull/push/create/copy/delete stubs
-    admin.py                # /admin pages and /admin/api/*
+    admin.py                # /admin pages and /admin/api/* (keys, status, live, export)
+    pod.py                  # /admin/api/pod, profiles, deploy, vllm, logs
   static/
     admin.html              # key management page
+    pod.html                # pod connection, profiles, deploy, progress, logs
     monitor.html            # live monitoring page
   translate/
     request.py              # Ollama → OpenAI (messages, tools, options, format, think)
@@ -486,13 +674,14 @@ src/ollama_vllm_proxy/
     stream.py               # SSE parser, tool-call accumulator, NDJSON emitter, timings
 tests/
   unit/                     # translation tables, tool-call accumulation, name resolution,
-                            # key hashing, metrics and nvidia-smi parsers, percentile maths
+                            # key hashing, metrics and nvidia-smi parsers, percentile maths,
+                            # profile validation and command building
   integration/              # app + respx-mocked vLLM, streaming and error paths
   e2e/                      # opt-in, against a live vLLM
-deploy/ollama-vllm-proxy.service   # systemd unit (After=vllm.service, EnvironmentFile for the key)
+deploy/ollama-vllm-proxy.service   # systemd user unit for Linux; macOS runs it with `uv run`
 ```
 
-## 13. Milestones
+## 14. Milestones
 
 1. **Skeleton** — project setup, config, lifespan-managed httpx client, `/`,
    `/api/version`, `/healthz`.
@@ -500,31 +689,41 @@ deploy/ollama-vllm-proxy.service   # systemd unit (After=vllm.service, Environme
 3. **API keys** — key CRUD, CLI, auth middleware on `/api` and `/v1`, admin
    token bootstrap. *Check*: a call without a key gets 401; a key created with
    the CLI is accepted; a revoked key is rejected.
-4. **`/v1` pass-through** — streaming reverse proxy, auth swap, model rewrite.
+4. **Pod connection** — pod form, asyncssh connection with host-key pinning,
+   reconnect, port forwards, backend state. *Check*: after Connect, vLLM started
+   by hand on the pod is reachable through the proxy's own tunnel.
+5. **Profiles and Deploy** — profile CRUD, command builder, deployment steps
+   with detached remote processes and resume, helper installation, Stop and
+   Restart. *Check*: on a fresh pod, one click ends in state `ready`; killing
+   the proxy mid-download and restarting it resumes the same deployment.
+6. **Pod page** — step list, download progress, live log panel.
+   *Check*: the vLLM log scrolls live in the browser during model load.
+7. **`/v1` pass-through** — streaming reverse proxy, auth swap, model rewrite,
+   `503` states when no backend is ready.
    *Check*: OpenAI SDK with `base_url=http://127.0.0.1:11434/v1` and a proxy key
    streams a chat completion.
-5. **Model discovery** — `/api/tags`, `/api/ps`, `/api/show`, name resolution.
+8. **Model discovery** — `/api/tags`, `/api/ps`, `/api/show`, name resolution.
    *Check*: `ollama-python` `list()` and `show()` work with the key in `headers`.
-6. **`/api/chat`** — non-streaming, then streaming, options mapping.
+9. **`/api/chat`** — non-streaming, then streaming, options mapping.
    *Check*: `ollama-python` streams a chat.
-7. **Thinking + tools + structured output** — `think`, `thinking` deltas,
+10. **Thinking + tools + structured output** — `think`, `thinking` deltas,
    tool-call accumulation, tool result round-trip, `format`.
    *Check*: `ollama-python` tool-calling example completes a full round trip.
-8. **`/api/generate`** — chat-wrapped and raw modes, load/unload shortcuts.
-9. **Stubs and errors** — pull/push/create/copy/delete, embeddings, upstream
+11. **`/api/generate`** — chat-wrapped and raw modes, load/unload shortcuts.
+12. **Stubs and errors** — pull/push/create/copy/delete, embeddings, upstream
    failure mapping, mid-stream errors, client-disconnect cancellation.
-10. **Management page** — `/admin` key management UI on top of the admin API.
+13. **Management page** — `/admin` key management UI on top of the admin API.
     *Check*: create a key in the browser, use it, revoke it, see it rejected.
-11. **Request observer and samplers** — `requests` rows for both dialects,
-    vLLM `/metrics` scraping, GPU sampling, inventory.
+14. **Request observer and samplers** — `requests` rows for both dialects,
+    vLLM `/metrics` scraping, GPU helper scraping through the tunnel, inventory.
     *Check*: rows and samples appear in SQLite with no prompt content.
-12. **Live monitoring page** — `/admin/api/live` and `/admin/monitor`.
-13. **Report export** — HTML and JSON export, CLI, download picker.
+15. **Live monitoring page** — `/admin/api/live` and `/admin/monitor`.
+16. **Report export** — HTML and JSON export, CLI, download picker.
     *Check*: the file opens offline with all sections of the reference report
     that apply.
-14. **Packaging** — README, systemd unit, CI (ruff, pytest).
+17. **Packaging** — README, systemd unit, CI (ruff, pytest).
 
-## 14. Testing
+## 15. Testing
 
 - **Unit**: every row of the mapping tables in section 6; fragmented tool-call
   streams (single, multiple, interleaved with content and reasoning); invalid
@@ -545,15 +744,26 @@ deploy/ollama-vllm-proxy.service   # systemd unit (After=vllm.service, Environme
   fixtures; export of a seeded database compared with a golden data set; the
   HTML report contains no `<script>` and no external URL; no prompt text
   anywhere in SQLite after a full test run.
+- **Pod deployment**: integration tests against a local throw-away SSH server
+  (an sshd container with a stub `vllm`, `hf` and `nvidia-smi` on the path):
+  host-key confirmation and mismatch, every step's success and failure path,
+  resume after a dropped connection and after a proxy restart, cancel, Stop and
+  Restart, redeploy idempotence, profile switch. Assertions that the vLLM key
+  never appears in a remote command line, a log relayed to the browser, an API
+  response or a local log, and that hostile profile values (quotes, `;`, `$()`)
+  are rejected or passed as inert arguments.
 - **Admin pages**: Playwright smoke test — create, use, disable and revoke a key,
-  open the monitoring page, download a report.
+  open the monitoring page, download a report, run a deployment against the
+  stub SSH server and watch the log panel.
 - **Client compatibility** (live vLLM): `ollama-python` (chat, generate, stream,
   tools, think) and the OpenAI SDK (chat, stream, tools), both with a proxy
   key, and Open WebUI pointed at the proxy.
+- **Real pod** (manual, before release): one full deployment of the default
+  profile on a Runpod pod, from a fresh pod to a streamed chat completion.
 - **Prefix cache check**: send the same multi-turn conversation twice and
   confirm from vLLM metrics that the second request hits the prefix cache.
 
-## 15. Open points to verify during implementation
+## 16. Open points to verify during implementation
 
 1. **Reasoning field name** in the installed vLLM (`reasoning_content` vs
    `reasoning`) — the proxy reads both, but tests should pin the actual one.
@@ -575,6 +785,22 @@ deploy/ollama-vllm-proxy.service   # systemd unit (After=vllm.service, Environme
    versions; pin the series used by the charts against the installed build.
 9. **`/metrics` and `/version` authentication** — whether the installed vLLM
    requires the API key on these routes (the proxy sends it either way).
-10. **`nvidia-smi` access** — the proxy process must be able to run
-    `nvidia-smi` on the vLLM host; if it runs in a container without GPU
-    access, use an exporter URL or `GPU_SOURCE=off`.
+10. **The `vllm/vllm-openai:latest` template on Runpod** — the image's own
+    entrypoint is `vllm serve`, so the template must be configured so that the
+    container stays up without serving a model (or with a start command the
+    preflight can recognise) and so that an SSH daemon is running; Runpod's
+    "SSH over exposed TCP" needs sshd inside the image and TCP 22 exposed.
+    Confirm what the template does out of the box. If it already starts vLLM
+    on port 8000, preflight detects it and Deploy asks whether to replace it.
+11. **Tools present in the image** — `hf` CLI, `python3` on the path for the
+    helper, and a `vllm` version that knows the profile's parsers
+    (`qwen3_coder`, `qwen3`). If `hf` is missing, Deploy installs
+    `huggingface_hub` with `pip` as an extra step.
+12. **`/workspace` persistence** — whether the template mounts a volume there
+    and how large it is; the model directory, logs and helper files assume it
+    survives a pod restart.
+13. **`VLLM_API_KEY` from the environment** — confirm the installed vLLM reads
+    the key from the environment variable; otherwise fall back to a config
+    file passed with `--config`, still keeping it off the command line.
+14. **Hugging Face token** — whether any profile you plan to use needs a gated
+    repo; the default one does not.
