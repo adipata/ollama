@@ -558,9 +558,11 @@ detection and log display.
 
 ### 12.3 Deployment profiles and hardware fit
 
-The GPU is not known in advance: it may be one RTX PRO 6000, one or two
-RTX 6000 Ada, an H100, two A40 and so on, and the right quantization — or the
-right model — depends on what was available. A profile therefore describes
+The GPU is not known in advance: it is whatever Runpod has available when you
+rent — one large card, two mid-size ones, and so on — and the right
+quantization, or the right model, depends on it. Nothing in the application is
+tied to a list of GPU models: the fit plan works from what the pod reports
+(GPU count, memory per GPU, compute capability). A profile therefore describes
 **what you want to serve**, and Deploy works out **how to run it on the pod it
 finds**.
 
@@ -619,17 +621,36 @@ cache, Deploy reads the limit from the log, and offers to restart with that
 context (automatic when it is still above the profile's minimum).
 
 **Sizing help before renting.** The same calculation runs without a pod: the
-Pod page has a small table of common GPU configurations (editable list: 1× and
-2× RTX PRO 6000, RTX 6000 Ada, A40, H100, …) against the profile's variants,
+Pod page has a table of GPU configurations against the profile's variants,
 showing which variant and context each would get and the container disk to
-request. That is where the "container disk" figure in 12.1 comes from.
+request. That is where the "container disk" figure in 12.1 comes from. The
+table is driven by an editable catalog (name, memory per GPU, maximum count,
+generation). It is only a convenience for choosing what to rent: a GPU that is
+not in the catalog deploys exactly the same way, because Deploy uses what the
+pod reports.
 
-**FP8 on older GPUs.** FP8 checkpoints use 8-bit activations only on GPUs that
-support it (Ada, Hopper, Blackwell). On Ampere cards such as the A40, vLLM
-keeps the weights in 8 bits but computes with 16-bit activations, so memory
-savings remain and speed differs (see `Weight-only fallback.md` in
-confidential-inference-test). The plan table flags this from the GPU's compute
-capability as a note, not as a failure.
+The catalog is seeded from the Runpod hardware list as of November 2026
+(prices are not stored; availability changes by the hour):
+
+| Generation | GPU (memory per GPU, max per pod) |
+|---|---|
+| Blackwell | B300 (288 GB, 8) · B200 (180 GB, 1) · RTX PRO 6000 (96 GB, 1) · RTX PRO 6000 WK (96 GB, 8) · RTX 5090 (32 GB, 8) · RTX PRO 4500 and 4500 SE (32 GB, 8) · RTX PRO 4000 (24 GB, 1) |
+| Blackwell, MIG slice | PRO 6000 MIG 48GB (48 GB) · PRO 6000 MIG 24GB (24 GB) — treated as single-GPU only |
+| Hopper | H200 NVL (143 GB, 8) · H200 SXM (141 GB, 2) · H100 NVL (94 GB, 8) · H100 SXM (80 GB, 2) · H100 PCIe (80 GB, 8) |
+| Ada | L40 (48 GB, 8) · L40S (48 GB, 8) · RTX 6000 Ada (48 GB, 8) · RTX 4090 (24 GB, 1) · L4 (24 GB, 8) · RTX 4000 Ada (20 GB, 8) · RTX 2000 Ada (16 GB, 1) |
+
+**Not supported.**
+
+- *Ampere-generation GPUs* — A40, RTX A6000, A100 PCIe/SXM, RTX 3090,
+  RTX A5000, RTX A4500, RTX A4000. They lack native 8-bit floating-point
+  computation, so FP8 checkpoints run in a different mode than on newer cards
+  and the FP8 KV cache is unverified there. Rather than carry a second code
+  path, they are left out of the catalog, and preflight stops with a clear
+  message when the pod's compute capability is below 8.9. (BF16 does run on
+  them — the reference project used 2× RTX A6000 — so this is a simplification,
+  and "deploy anyway" remains available for a BF16 variant.)
+- *AMD GPUs* (MI300X, MI350X) — the image and the vLLM build are CUDA-only;
+  Runpod itself marks them incompatible with this template.
 
 **What a deployment records.** The chosen variant, GPU model and count,
 tensor-parallel size and context are stored with the deployment and combined
@@ -886,52 +907,117 @@ deploy/ollama-vllm-proxy.service   # systemd user unit for Linux; macOS runs it 
 
 ## 16. Open points to verify during implementation
 
-1. **Reasoning field name** in the installed vLLM (`reasoning_content` vs
-   `reasoning`) — the proxy reads both, but tests should pin the actual one.
-2. **Thinking toggle** — confirm that `chat_template_kwargs.enable_thinking` is
-   what this Qwen chat template honours, and what the model does when `think`
-   is omitted (Ollama clients on recent versions expect thinking to be on for
-   thinking-capable models).
-3. **Structured output parameter** — `response_format` with `json_schema` vs the
-   vLLM-specific structured-output field for the installed version.
-4. **Vision** — whether the served checkpoint accepts images; if not,
-   `messages[].images` should return a clear 400 and `vision` stays out of
-   `capabilities`.
-5. **`/v1/responses` and `/v1/messages`** availability upstream.
-6. **Embeddings** — whether a second vLLM instance with an embedding model is
-   wanted; if so add `EMBED_BASE_URL` / `EMBED_MODEL`.
-7. **`OLLAMA_VERSION` value** — pick one high enough that target clients enable
-   tools and thinking.
+Each point says what is uncertain and how to settle it. "On the pod" means in
+an SSH session with `source /workspace/venv/bin/activate`; "against vLLM"
+means with vLLM running and `K=$VLLM_API_KEY`,
+`U=http://127.0.0.1:8000`.
+
+1. **Reasoning field name** — vLLM returns reasoning as `reasoning_content` or
+   `reasoning` depending on the version. The proxy reads both, but tests
+   should pin the real one.
+   *Verify*: against vLLM,
+   `curl -s $U/v1/chat/completions -H "Authorization: Bearer $K" -H 'Content-Type: application/json' -d '{"model":"dev-test","messages":[{"role":"user","content":"What is 17*23?"}]}' | python3 -m json.tool`
+   and read which key under `choices[0].message` holds the reasoning. Repeat
+   with `"stream": true` and check the key in the `delta` objects.
+2. **Thinking toggle** — whether `chat_template_kwargs.enable_thinking` is what
+   this model's chat template honours, and what happens when it is omitted.
+   *Verify*: send the request of point 1 three times: with
+   `"chat_template_kwargs":{"enable_thinking":false}`, with `true`, and
+   without the field. Reasoning must be absent in the first, present in the
+   second; the third shows the default. Cross-check by searching the model's
+   `chat_template.jinja` (or `tokenizer_config.json`) for `enable_thinking`.
+3. **Structured output parameter** — whether `response_format` with
+   `json_schema` is enforced by vLLM 0.34.0, or a vLLM-specific field is
+   needed.
+   *Verify*: send a chat request with
+   `"response_format":{"type":"json_schema","json_schema":{"name":"t","schema":{"type":"object","properties":{"n":{"type":"integer"}},"required":["n"],"additionalProperties":false}}}`
+   and a prompt that invites prose. The content must parse as JSON matching
+   the schema. Repeat with `{"type":"json_object"}`.
+4. **Vision** — whether the served checkpoint accepts images.
+   *Verify*: check the model card and whether `config.json` has a
+   `vision_config`; then send a chat message whose content includes an
+   `image_url` part with a small base64 PNG. A description means yes; a 400
+   means no, and `messages[].images` must be rejected by the proxy.
+5. **`/v1/responses` and `/v1/messages` upstream** — whether vLLM 0.34.0
+   exposes them.
+   *Verify*: `curl -s $U/openapi.json -H "Authorization: Bearer $K" | python3 -c "import json,sys; print('\n'.join(sorted(json.load(sys.stdin)['paths'])))"`
+   and look for the two paths. The same list settles which other routes the
+   pass-through can rely on.
+6. **Embeddings** — a product decision, not a technical unknown: is an
+   embedding endpoint needed at all?
+   *Verify*: list the clients you will point at the proxy and check whether
+   any of them calls `/api/embed` or `/v1/embeddings` (Open WebUI does when
+   document search is enabled). If none does, the 501 stays.
+7. **`OLLAMA_VERSION` value** — clients enable tools and thinking only above
+   certain server versions.
+   *Verify*: read the current release number from the Ollama releases page and
+   use it; then run the `ollama-python` tool-calling and thinking examples
+   through the proxy and confirm neither is disabled client-side.
 8. **vLLM `/metrics` names** — metric and label names differ between vLLM
-   versions; pin the series used by the charts against the installed build.
-9. **`/metrics` and `/version` authentication** — whether the installed vLLM
-   requires the API key on these routes (the proxy sends it either way).
-10. **Model size and disk figure** — the 100 GB container-disk recommendation
-    assumes about 54 GB of BF16 weights (the figure from the reference
-    project's notes); the fit plan replaces it with the sizes reported by the
-    Hugging Face API.
+   versions.
+   *Verify*: `curl -s $U/metrics | grep -E '^vllm:' | cut -d'{' -f1 | sort -u`
+   and compare with the series the charts need: running and waiting requests,
+   KV-cache usage, prompt and generation token counters, prefix-cache hits and
+   queries, preemptions, `cache_config_info`. Save the output as a test
+   fixture.
+9. **`/metrics`, `/health` and `/version` authentication** — whether these
+   routes require the API key.
+   *Verify*: `for r in metrics health version; do curl -s -o /dev/null -w "$r %{http_code}\n" $U/$r; done`
+   without a key, then with it. The proxy sends the key either way; the result
+   only decides what the tests assert.
+10. **Model sizes and the disk figure** — the 100 GB recommendation assumes
+    about 54 GB of BF16 weights.
+    *Verify*: on any machine,
+    `python3 -c "from huggingface_hub import HfApi; [print(r, round(sum(f.size or 0 for f in HfApi().model_info(r, files_metadata=True).siblings)/1e9,1),'GB') for r in ('Qwen/Qwen3.8-27B','Qwen/Qwen3.8-27B-FP8')]"`.
+    This also confirms that both repo names exist.
 11. **Fit estimate calibration** — the per-GPU overhead and the KV-cache cost
-    per token are estimates; compare them with what vLLM logs at startup
-    (KV cache size, maximum concurrency) on the first real deployments of each
-    GPU type and adjust the constants. The reference runs give two data points:
-    BF16 on 1× RTX PRO 6000 at 131072 and on 2× RTX A6000.
-12. **Download accelerator** — which of `hf_transfer` / `hf_xet` the installed
-    `huggingface_hub` actually uses, and whether a missing package makes
-    `hf download` fail when the image's variables are set.
+    per token are estimates.
+    *Verify*: after each first deployment on a new GPU type, compare the plan's
+    prediction with vLLM's startup log:
+    `grep -iE 'kv cache|maximum concurrency|model loading took|GiB' /workspace/vllm.log`
+    and with `nvidia-smi --query-gpu=memory.used --format=csv` once loaded.
+    Adjust the two constants until prediction and log agree within a few
+    percent. The reference reports (BF16 on 1× RTX PRO 6000 at 131072) give a
+    first data point.
+12. **Download accelerator** — whether `hf download` fails when the image's
+    `HF_HUB_ENABLE_HF_TRANSFER` is set and the package is missing, and which
+    accelerator is used.
+    *Verify*: on the pod, `env | grep -E '^HF_'`,
+    `uv pip list | grep -iE 'hf|xet|transfer'`, then
+    `time hf download Qwen/Qwen3.8-27B-FP8 config.json --local-dir /tmp/hf-test`.
+    An error naming `hf_transfer` means it must be installed; the timing of
+    one large file with and without the variables shows whether it matters.
 13. **Host key stability** — whether the pod's SSH host key changes when a pod
-    is stopped and resumed, which decides how often the fingerprint prompt
-    appears.
-14. **`VLLM_API_KEY` from the environment** — confirm the installed vLLM reads
-    the key from the environment variable; otherwise fall back to a config
-    file passed with `--config`, still keeping it off the command line.
-15. **Hugging Face token** — whether any profile you plan to use needs a gated
-    repo; the default one does not.
-16. **Tensor parallelism on two GPUs** — confirm with vLLM 0.34.0 that the
-    default model starts with `--tensor-parallel-size 2` on 2× 48 GB cards,
-    and what `/dev/shm` size it needs (the pods seen so far had 14–19 GB).
-17. **FP8 KV cache on Ampere** — whether `--kv-cache-dtype fp8` is accepted on
-    A40-class GPUs; if not, the plan drops that argument there and counts the
-    KV cache at 16 bits.
-18. **Exact repo names and sizes** of the variants in the default profile
-    (`Qwen/Qwen3.8-27B`, `Qwen/Qwen3.8-27B-FP8`), read from the Hugging Face
-    API when the profile is first loaded.
+    is stopped and resumed.
+    *Verify*: `ssh-keyscan -p <PORT> <IP> | ssh-keygen -lf -`, stop and resume
+    the pod in the Runpod console, run it again and compare the fingerprints
+    (the port and IP may change too).
+14. **`VLLM_API_KEY` from the environment** — whether vLLM 0.34.0 takes the
+    key from the environment variable without `--api-key`.
+    *Verify*: start vLLM with `VLLM_API_KEY=test123 vllm serve ...` and no
+    `--api-key`; `curl -s -o /dev/null -w '%{http_code}\n' $U/v1/models` must
+    give 401 and the same with `-H 'Authorization: Bearer test123'` must give
+    200. Also check `ps aux | grep vllm` and the log for the string `test123`.
+15. **Hugging Face token** — whether a repo you plan to use is gated.
+    *Verify*: the command of point 10 without being logged in; a gated repo
+    raises `GatedRepoError`. The model page also shows an access form.
+16. **Tensor parallelism on two GPUs** — whether the default model starts with
+    `--tensor-parallel-size 2` and how much `/dev/shm` it needs.
+    *Verify*: rent a 2-GPU pod of a supported type (for example 2× L40S or
+    2× RTX 6000 Ada), deploy the BF16 variant, and check that the log reaches
+    "Application startup complete", that `nvidia-smi` shows memory used on
+    both GPUs, and `df -h /dev/shm` while serving. One chat completion confirms
+    it end to end.
+17. **MIG slices** — whether vLLM runs on a "PRO 6000 MIG" instance, which
+    exposes a slice of a GPU rather than a whole one.
+    *Verify*: rent a MIG 48GB pod, run the pod-information block from the
+    baseline probe (`nvidia-smi`, the `--query-gpu` line, `dmon`) to see which
+    fields are missing, then deploy the FP8 variant. Until verified, MIG pods
+    are marked "untested" in the plan table.
+18. **Compute-capability threshold** — that 8.9 is the right cut between
+    supported and unsupported generations, and that the pod reports it.
+    *Verify*: on any supported pod,
+    `nvidia-smi --query-gpu=name,compute_cap --format=csv`; expect 8.9 for
+    Ada, 9.0 for Hopper and a higher value for Blackwell. If the field is
+    missing, use
+    `python -c "import torch; print(torch.cuda.get_device_capability(0))"`.
