@@ -509,7 +509,7 @@ You:
 
 1. Start a pod in the Runpod console with these settings:
    - Template **Ubuntu 24.04**, image `runpod/base:2.1.0-cuda1320-ubuntu2404`.
-   - **Container disk**: model size + 25 GB (about 12 GB for the vLLM
+   - **Container disk**: model size + 25 GB (about 9 GB for the vLLM
      environment, the rest for caches, logs and headroom). For the default
      profile use **80 GB**; the Pod page shows the figure for each profile.
      No network volume.
@@ -537,6 +537,9 @@ detection and log display.
 | `sshd` running on port 22, `authorized_keys` provisioned by Runpod | Key-based SSH works without any setup |
 | `uv`, Python 3.12.3 (also 3.11, 3.13), `venv`, `pip`, `git`, `curl`, `gcc` present | No `apt` step needed; the install uses the `uv` already in the image |
 | `vllm`, `hf` not installed | Deploy installs both into a dedicated virtual environment |
+| Measured install: `uv venv --python 3.12` + `uv pip install vllm huggingface_hub` takes 1 min 41 s and gives vLLM 0.34.0 with PyTorch 2.14.0+cu130; `torch.cuda.is_available()` is true | The install step is short next to the download; no custom PyTorch index or CUDA setup is needed |
+| The environment is 8.9 GB, but the disk grew by 18 GB because `uv` keeps a second copy in its cache | The install runs with `--no-cache`, so the environment costs about 9 GB, not 18 |
+| vLLM 0.34.0 lists `qwen3_coder` among its tool-call parsers | The default profile's tool parser is valid for the pinned version |
 | Driver 595.112.07, CUDA 13.2 libraries and cuDNN 9 in the image | New enough for current PyTorch wheels, which bundle their own CUDA runtime |
 | `/workspace` is a plain directory on the 30 GB container overlay, not a volume | Disk size is whatever you set as container disk; nothing persists. Paths stay under `/workspace` for consistency |
 | Container memory limit is 31 GB although `free` reports 125 GB | Preflight reads the cgroup limit (`/sys/fs/cgroup/memory.max`), not `free` |
@@ -548,7 +551,7 @@ detection and log display.
 | Environment sets `HF_HUB_ENABLE_HF_TRANSFER` and `HF_XET_HIGH_PERFORMANCE` | The download step installs the matching accelerator packages and sets its own Hugging Face variables explicitly instead of inheriting them |
 | `RUNPOD_POD_ID`, `RUNPOD_DC_ID`, `RUNPOD_GPU_NAME`, `RUNPOD_GPU_COUNT`, `RUNPOD_MEM_GB`, `RUNPOD_CPU_COUNT` available | Recorded (values of these six only) in the inventory and shown in the report header |
 | All `nvidia-smi --query-gpu` fields used by the helper and `nvidia-smi dmon -s t` work | The GPU helper from confidential-inference-test runs unchanged |
-| The probed pod had one RTX PRO 4000 Blackwell with 24 GB | Too small for the default 27B FP8 profile; preflight compares GPU memory with the model size and stops before downloading |
+| Target hardware is one RTX PRO 6000; the first probe ran on an RTX PRO 4000 Blackwell with 24 GB | Profiles are written for a single GPU (no `--tensor-parallel-size`). Preflight still compares GPU memory with the model size and stops before downloading, so a pod rented with the wrong GPU fails fast |
 
 ### 12.3 Deployment profiles
 
@@ -562,7 +565,7 @@ command, so the proxy always knows the model name and context length.
 | Served model name | `dev-test` |
 | Max model length | `65536` |
 | Extra vLLM arguments (ordered flag/value list) | `--kv-cache-dtype fp8`, `--enable-prefix-caching`, `--enable-auto-tool-choice`, `--tool-call-parser qwen3_coder`, `--reasoning-parser qwen3` |
-| vLLM version | latest (a pinned version such as `==0.x.y` is recommended once one is known to work) |
+| vLLM version | `0.34.0` (the version verified on this image; editable per profile) |
 | Python version for the environment | `3.12` |
 | Extra environment variables | none |
 | Needs Hugging Face token | no |
@@ -602,7 +605,7 @@ recorded in `deployments`.
 | 1 | Connect | Open or reuse the SSH connection, verify the pinned host key |
 | 2 | Preflight | GPUs and total GPU memory against the model size; free container disk against model size + environment; container memory limit; `/dev/shm`; `uv` and the profile's Python version present; ports 8000 and 9400 free or held by our own processes; `huggingface.co` and `pypi.org` reachable. Problems stop the deployment here with a specific message, before anything is downloaded |
 | 3 | Install helper | Upload `gpu_exporter.py` and the launcher scripts by SFTP to `/workspace/ovp/`, start the helper on `127.0.0.1:9400` with the system `python3`, check its `/healthz` through the tunnel. Done first so GPU and disk activity are visible during the rest |
-| 4 | Install vLLM | `uv venv /workspace/venv --python <version>`, then `uv pip install` of `vllm` (profile version), `huggingface_hub` and the download accelerators into it. Verified with `vllm --version`; the installed versions of vLLM, PyTorch and transformers go to the inventory. Skipped when the environment already has the requested version |
+| 4 | Install vLLM | `uv venv /workspace/venv --python <version>`, then `uv pip install --no-cache` of `vllm==<profile version>`, `huggingface_hub` and the download accelerators into it (about 1 min 40 s, 9 GB). Verified with `vllm --version`; the installed versions of vLLM, PyTorch and transformers go to the inventory. Skipped when the environment already has the requested version |
 | 5 | Download model | `hf download <repo> --local-dir <dir>` from the environment; resumable, and near-instant when the files are already present. Progress is the downloaded size against the repo size |
 | 6 | Write secrets | Generate a fresh vLLM API key locally, write it (and the Hugging Face token if the profile needs one) to `/workspace/ovp/vllm.env`, mode `0600` |
 | 7 | Start vLLM | `vllm serve <dir> ...` from the profile, output to `/workspace/vllm.log` |
@@ -829,19 +832,16 @@ deploy/ollama-vllm-proxy.service   # systemd user unit for Linux; macOS runs it 
    versions; pin the series used by the charts against the installed build.
 9. **`/metrics` and `/version` authentication** — whether the installed vLLM
    requires the API key on these routes (the proxy sends it either way).
-10. **Clean vLLM install on the base image** — run the install step once by
-    hand on a pod (`uv venv /workspace/venv --python 3.12`, then
-    `uv pip install vllm huggingface_hub`) and record the installed size, the
-    time it takes, the PyTorch/CUDA build it selects and whether `vllm serve`
-    starts with driver 595 / CUDA 13.2. Pin the vLLM version that works in the
-    default profile, and confirm it knows the `qwen3_coder` tool parser and the
-    `qwen3` reasoning parser.
+10. **Reasoning parser name** — vLLM 0.34.0 does not list the accepted values
+    of `--reasoning-parser` in its help, so `qwen3` is still unconfirmed for
+    this version. It is checked the first time vLLM starts; an invalid name
+    makes vLLM exit at once, which Deploy reports with the log lines.
 11. **Model size and disk figure** — the 80 GB container-disk recommendation
     assumes about 30 GB of weights for `Qwen/Qwen3.8-27B-FP8`; replace it with
     the size reported by the Hugging Face API, which preflight uses anyway.
-12. **Target GPU** — which GPU type the real deployments will use. The probed
-    pod (24 GB, 31 GB container RAM) cannot hold the default model; the
-    reference report was taken on an RTX PRO 6000.
+12. **First start on the RTX PRO 6000** — confirm that the default profile
+    loads and serves with vLLM 0.34.0 / PyTorch 2.14.0+cu130 on driver 595,
+    and note the load time for the readiness timeout.
 13. **Download accelerator** — which of `hf_transfer` / `hf_xet` the installed
     `huggingface_hub` actually uses, and whether a missing package makes
     `hf download` fail when the image's variables are set.
