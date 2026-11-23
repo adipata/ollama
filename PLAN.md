@@ -25,16 +25,17 @@ management web interface, which also hosts a live monitoring page and a
 downloadable session report modelled on the one in
 `adipata/confidential-inference-test` (`proxy/perfproxy`).
 
-The same interface deploys the backend: after you start a pod from the
-`vllm/vllm-openai:latest` template in the Runpod console and enter its SSH
-address, a **Deploy** button downloads the model, installs the monitoring
-helper, starts vLLM and shows the progress and the vLLM log.
+The same interface deploys the backend: after you start a plain Ubuntu pod
+(`runpod/base:2.1.0-cuda1320-ubuntu2404`) in the Runpod console and enter its
+SSH address, a **Deploy** button installs vLLM, downloads the model, installs
+the monitoring helper, starts vLLM and shows the progress and the vLLM log.
 
 ## 1. Target backend (given)
 
-vLLM runs in a Runpod pod started by hand from the `vllm/vllm-openai:latest`
-template. The proxy starts it there (section 12) with the command of the
-selected deployment profile; the default profile is:
+vLLM runs in a Runpod pod started by hand from the plain Ubuntu 24.04 template
+`runpod/base:2.1.0-cuda1320-ubuntu2404`, which contains no vLLM. The proxy
+installs and starts it there (section 12) with the command of the selected
+deployment profile; the default profile is:
 
 ```bash
 vllm serve /workspace/qwen3.8-27b-fp8 \
@@ -63,6 +64,7 @@ What this implies for the proxy:
 | No embedding model | `/api/embed` and `/v1/embeddings` are unsupported unless a second backend is configured |
 | vLLM binds `127.0.0.1` inside the pod | Nothing is exposed on Runpod's public ports except SSH; all traffic goes through the tunnel |
 | Pod IP, SSH port and host key change with every rental | Connection details are entered in the management interface, not in config files |
+| No network volume; everything is on the pod's container disk | Nothing survives the pod. Every new pod needs the full install and download, so Deploy must do all of it unattended |
 
 ## 2. Goals and non-goals
 
@@ -339,7 +341,7 @@ One file, `DATA_DIR/proxy.sqlite3`, opened in WAL mode with
 | `engine_samples` | `ts`, `name`, `labels`, `value` — `vllm:*` series from `/metrics`, `gpu:*` series, `proxy:open_requests` |
 | `inventory` | `ts`, `kind`, `data` (JSON) — GPU identities and limits, driver/CUDA, vLLM version and cache config, vLLM startup lines; a row is written only when the content changes |
 | `pod` | The current pod connection: SSH host, port, user, key path, pinned host-key fingerprint, last connection state |
-| `profiles` | Deployment profiles (section 12.2) |
+| `profiles` | Deployment profiles (section 12.3) |
 | `deployments` | One row per Deploy click: profile snapshot, start/end time, final state, and per-step status with timestamps |
 | `secrets` | The generated vLLM API key and optional Hugging Face token (see below) |
 | `state` | Key/value settings such as the admin token hash and counters for rejected requests |
@@ -505,8 +507,16 @@ key or session, saved as one self-contained file.
 
 You:
 
-1. Start a pod from the `vllm/vllm-openai:latest` template in the Runpod
-   console, with your public SSH key on the account and TCP port 22 exposed.
+1. Start a pod in the Runpod console with these settings:
+   - Template **Ubuntu 24.04**, image `runpod/base:2.1.0-cuda1320-ubuntu2404`.
+   - **Container disk**: model size + 25 GB (about 12 GB for the vLLM
+     environment, the rest for caches, logs and headroom). For the default
+     profile use **80 GB**; the Pod page shows the figure for each profile.
+     No network volume.
+   - **Expose only TCP port 22.** Remove the HTTP ports: the image also runs
+     JupyterLab, nginx and a web terminal, which are not needed and should not
+     be published.
+   - Your public SSH key on the Runpod account.
 2. Copy the address from **Connect → SSH over exposed TCP** into the **Pod**
    page: host, port, user (`root`) and the private key path.
 3. Click **Connect**, confirm the host-key fingerprint, pick a profile and
@@ -515,10 +525,32 @@ You:
    cannot do this, and the page says so whenever a pod is connected: stopping
    vLLM does not stop the billing.
 
-The application does everything else: SSH connection, tunnel, model download,
-helper installation, starting vLLM, readiness detection and log display.
+The application does everything else: SSH connection, tunnel, vLLM
+installation, model download, helper installation, starting vLLM, readiness
+detection and log display.
 
-### 12.2 Deployment profiles
+### 12.2 Pod baseline (measured on a pod from this template)
+
+| Finding | Consequence for Deploy |
+|---|---|
+| Ubuntu 24.04.5, user `root`, no systemd (PID 1 is `docker-init` running `/start.sh`) | Processes are started detached with `setsid nohup` and tracked by PID files; no service units |
+| `sshd` running on port 22, `authorized_keys` provisioned by Runpod | Key-based SSH works without any setup |
+| `uv`, Python 3.12.3 (also 3.11, 3.13), `venv`, `pip`, `git`, `curl`, `gcc` present | No `apt` step needed; the install uses the `uv` already in the image |
+| `vllm`, `hf` not installed | Deploy installs both into a dedicated virtual environment |
+| Driver 595.112.07, CUDA 13.2 libraries and cuDNN 9 in the image | New enough for current PyTorch wheels, which bundle their own CUDA runtime |
+| `/workspace` is a plain directory on the 30 GB container overlay, not a volume | Disk size is whatever you set as container disk; nothing persists. Paths stay under `/workspace` for consistency |
+| Container memory limit is 31 GB although `free` reports 125 GB | Preflight reads the cgroup limit (`/sys/fs/cgroup/memory.max`), not `free` |
+| `/dev/shm` is 14 GB | Enough for vLLM; preflight warns below 1 GB |
+| Open-file limit is 1024 | The vLLM launcher raises it (`ulimit -n 65535`) before starting |
+| Ports 8000 and 9400 are free; 22, 3001, 7270, 7861, 8001, 8081, 8888, 9091, 19123 are taken by image services | vLLM and the helper keep their planned ports, bound to `127.0.0.1` |
+| `huggingface.co`, `pypi.org`, `astral.sh` reachable | Install and download need no mirror |
+| Environment contains `RUNPOD_API_KEY` and `JUPYTER_PASSWORD` | Everything Deploy starts runs with a clean, whitelisted environment, so these never reach vLLM, its log or the helper |
+| Environment sets `HF_HUB_ENABLE_HF_TRANSFER` and `HF_XET_HIGH_PERFORMANCE` | The download step installs the matching accelerator packages and sets its own Hugging Face variables explicitly instead of inheriting them |
+| `RUNPOD_POD_ID`, `RUNPOD_DC_ID`, `RUNPOD_GPU_NAME`, `RUNPOD_GPU_COUNT`, `RUNPOD_MEM_GB`, `RUNPOD_CPU_COUNT` available | Recorded (values of these six only) in the inventory and shown in the report header |
+| All `nvidia-smi --query-gpu` fields used by the helper and `nvidia-smi dmon -s t` work | The GPU helper from confidential-inference-test runs unchanged |
+| The probed pod had one RTX PRO 4000 Blackwell with 24 GB | Too small for the default 27B FP8 profile; preflight compares GPU memory with the model size and stops before downloading |
+
+### 12.3 Deployment profiles
 
 Stored in SQLite and edited in the UI. A profile is structured, not a free-form
 command, so the proxy always knows the model name and context length.
@@ -530,6 +562,8 @@ command, so the proxy always knows the model name and context length.
 | Served model name | `dev-test` |
 | Max model length | `65536` |
 | Extra vLLM arguments (ordered flag/value list) | `--kv-cache-dtype fp8`, `--enable-prefix-caching`, `--enable-auto-tool-choice`, `--tool-call-parser qwen3_coder`, `--reasoning-parser qwen3` |
+| vLLM version | latest (a pinned version such as `==0.x.y` is recommended once one is known to work) |
+| Python version for the environment | `3.12` |
 | Extra environment variables | none |
 | Needs Hugging Face token | no |
 
@@ -540,7 +574,7 @@ or run it without a key. Profiles can be created, duplicated, edited and
 deleted; the page shows the exact command a profile will run before you deploy
 it. Each deployment stores a snapshot of the profile it used.
 
-### 12.3 SSH connection and tunnel
+### 12.4 SSH connection and tunnel
 
 - One asyncssh connection per pod, key-based only, with keepalives
   (15 s interval, 3 misses) and automatic reconnect with backoff. A
@@ -557,7 +591,7 @@ it. Each deployment stores a snapshot of the profile it used.
 - A dropped connection does not affect what runs on the pod. The proxy returns
   `503` until the tunnel is back, then resumes without a redeploy.
 
-### 12.4 What Deploy does
+### 12.5 What Deploy does
 
 Deploy is a sequence of steps. Each has a status (pending, running, done,
 skipped, failed), timestamps and its own output, all visible on the page and
@@ -566,13 +600,18 @@ recorded in `deployments`.
 | # | Step | Detail |
 |---|---|---|
 | 1 | Connect | Open or reuse the SSH connection, verify the pinned host key |
-| 2 | Preflight | `nvidia-smi` (GPUs and memory), free space under `/workspace` against the model size, `python3`, `vllm --version`, the `hf` CLI, whether something already listens on port 8000. Problems stop the deployment here with a specific message |
-| 3 | Install helper | Upload `gpu_exporter.py` and the launcher scripts by SFTP to `/workspace/ovp/`, start the helper on `127.0.0.1:9400`, check its `/healthz` through the tunnel |
-| 4 | Download model | `hf download <repo> --local-dir <dir>`; resumable, and near-instant when the files are already present. Progress is the downloaded size against the repo size |
-| 5 | Write secrets | Generate a fresh vLLM API key locally, write it (and the Hugging Face token if the profile needs one) to `/workspace/ovp/vllm.env`, mode `0600` |
-| 6 | Start vLLM | `vllm serve <dir> ...` from the profile, output to `/workspace/vllm.log` |
-| 7 | Wait until ready | Poll `/health` through the tunnel while streaming the log; fail at once, showing the last log lines, if the process exits |
-| 8 | Activate | Read `/v1/models`, check the served name and max model length against the profile, switch the proxy to this backend |
+| 2 | Preflight | GPUs and total GPU memory against the model size; free container disk against model size + environment; container memory limit; `/dev/shm`; `uv` and the profile's Python version present; ports 8000 and 9400 free or held by our own processes; `huggingface.co` and `pypi.org` reachable. Problems stop the deployment here with a specific message, before anything is downloaded |
+| 3 | Install helper | Upload `gpu_exporter.py` and the launcher scripts by SFTP to `/workspace/ovp/`, start the helper on `127.0.0.1:9400` with the system `python3`, check its `/healthz` through the tunnel. Done first so GPU and disk activity are visible during the rest |
+| 4 | Install vLLM | `uv venv /workspace/venv --python <version>`, then `uv pip install` of `vllm` (profile version), `huggingface_hub` and the download accelerators into it. Verified with `vllm --version`; the installed versions of vLLM, PyTorch and transformers go to the inventory. Skipped when the environment already has the requested version |
+| 5 | Download model | `hf download <repo> --local-dir <dir>` from the environment; resumable, and near-instant when the files are already present. Progress is the downloaded size against the repo size |
+| 6 | Write secrets | Generate a fresh vLLM API key locally, write it (and the Hugging Face token if the profile needs one) to `/workspace/ovp/vllm.env`, mode `0600` |
+| 7 | Start vLLM | `vllm serve <dir> ...` from the profile, output to `/workspace/vllm.log` |
+| 8 | Wait until ready | Poll `/health` through the tunnel while streaming the log; fail at once, showing the last log lines, if the process exits |
+| 9 | Activate | Read `/v1/models`, check the served name and max model length against the profile, switch the proxy to this backend |
+
+Steps 4 and 5 run in parallel, since both are network-bound and independent;
+step 6 waits for both. On a fresh pod the whole sequence is dominated by the
+model download and the model load.
 
 Implementation rules:
 
@@ -584,11 +623,15 @@ Implementation rules:
 - **No secret on a command line**: the vLLM key reaches the process through the
   environment file (`VLLM_API_KEY`), not `--api-key`, so it does not appear in
   `ps` output or in the log's argument dump.
+- **Clean environment**: the launchers start every process with `env -i` and
+  an explicit list (`PATH`, `HOME`, `LANG`, `LD_LIBRARY_PATH`, the `NVIDIA_*`
+  and `CUDA_*` variables, `HF_HOME`, plus the profile's own variables), so the
+  pod's `RUNPOD_API_KEY` and `JUPYTER_PASSWORD` are not inherited.
 - **No shell injection**: remote commands are built from argument lists with
   `shlex.quote`; profile values are never interpolated into shell text. Repo,
   path and model-name fields are validated against strict patterns.
 - **Idempotent**: clicking Deploy again with the same profile skips finished
-  work (helper running, model present) and restarts vLLM only if it is not
+  work (helper running, environment installed, model present) and restarts vLLM only if it is not
   healthy. Deploying a different profile stops the running vLLM first, after a
   confirmation that states in-flight requests will be cut.
 - **One deployment at a time**; the button is disabled while one is running,
@@ -599,7 +642,7 @@ Other actions on the page: **Stop vLLM**, **Restart vLLM** (same profile, no
 download), **Disconnect** (closes SSH, leaves the pod running) and
 **Delete model files** (frees `/workspace` space; asks for confirmation).
 
-### 12.5 Progress and logs
+### 12.6 Progress and logs
 
 - A state line for the backend: `no pod` → `connected` → `deploying (step)` →
   `ready`, or `failed (step)`, `tunnel down`, `stopped`. The same state drives
@@ -607,7 +650,7 @@ download), **Disconnect** (closes SSH, leaves the pod running) and
   monitoring page.
 - The step list with live status, and a progress bar for the download.
 - A log panel with a source switch: **vLLM** (`/workspace/vllm.log`),
-  **download**, **GPU helper**. It loads the last 500 lines and then follows the
+  **install**, **download**, **GPU helper**. It loads the last 500 lines and then follows the
   file (`tail -F` over an SSH channel, relayed to the browser as server-sent
   events), with pause, auto-scroll and a download-full-log link. Key-like
   values are redacted before display; logs are relayed, not stored in SQLite.
@@ -625,7 +668,7 @@ download), **Disconnect** (closes SSH, leaves the pod running) and
 | `POST /admin/api/vllm/stop`, `POST /admin/api/vllm/restart` | Stop or restart vLLM |
 | `GET /admin/api/deploy/status` | Backend state, current deployment and step statuses |
 | `GET /admin/api/deploy/events` (SSE) | Live state and step updates |
-| `GET /admin/api/logs/stream?source=vllm\|download\|helper` (SSE) | Live log tail |
+| `GET /admin/api/logs/stream?source=vllm\|install\|download\|helper` (SSE) | Live log tail |
 
 ## 13. Project layout
 
@@ -648,6 +691,7 @@ src/ollama_vllm_proxy/
     remote/                 # files uploaded to the pod
       gpu_exporter.py       # vendored from confidential-inference-test/pod
       start_vllm.sh         # detached launcher: env file, PID file, log file
+      install_vllm.sh       # uv venv + uv pip install, version check
       start_download.sh
   live.py                   # in-memory ring and live snapshot
   export.py                 # report data set, SVG charts, self-contained HTML
@@ -693,8 +737,8 @@ deploy/ollama-vllm-proxy.service   # systemd user unit for Linux; macOS runs it 
    reconnect, port forwards, backend state. *Check*: after Connect, vLLM started
    by hand on the pod is reachable through the proxy's own tunnel.
 5. **Profiles and Deploy** — profile CRUD, command builder, deployment steps
-   with detached remote processes and resume, helper installation, Stop and
-   Restart. *Check*: on a fresh pod, one click ends in state `ready`; killing
+   with detached remote processes and resume, vLLM and helper installation,
+   Stop and Restart. *Check*: on a fresh pod, one click ends in state `ready`; killing
    the proxy mid-download and restarting it resumes the same deployment.
 6. **Pod page** — step list, download progress, live log panel.
    *Check*: the vLLM log scrolls live in the browser during model load.
@@ -745,7 +789,7 @@ deploy/ollama-vllm-proxy.service   # systemd user unit for Linux; macOS runs it 
   HTML report contains no `<script>` and no external URL; no prompt text
   anywhere in SQLite after a full test run.
 - **Pod deployment**: integration tests against a local throw-away SSH server
-  (an sshd container with a stub `vllm`, `hf` and `nvidia-smi` on the path):
+  (an sshd container with a stub `uv`, `vllm`, `hf` and `nvidia-smi` on the path):
   host-key confirmation and mismatch, every step's success and failure path,
   resume after a dropped connection and after a proxy restart, cancel, Stop and
   Restart, redeploy idempotence, profile switch. Assertions that the vLLM key
@@ -785,22 +829,27 @@ deploy/ollama-vllm-proxy.service   # systemd user unit for Linux; macOS runs it 
    versions; pin the series used by the charts against the installed build.
 9. **`/metrics` and `/version` authentication** — whether the installed vLLM
    requires the API key on these routes (the proxy sends it either way).
-10. **The `vllm/vllm-openai:latest` template on Runpod** — the image's own
-    entrypoint is `vllm serve`, so the template must be configured so that the
-    container stays up without serving a model (or with a start command the
-    preflight can recognise) and so that an SSH daemon is running; Runpod's
-    "SSH over exposed TCP" needs sshd inside the image and TCP 22 exposed.
-    Confirm what the template does out of the box. If it already starts vLLM
-    on port 8000, preflight detects it and Deploy asks whether to replace it.
-11. **Tools present in the image** — `hf` CLI, `python3` on the path for the
-    helper, and a `vllm` version that knows the profile's parsers
-    (`qwen3_coder`, `qwen3`). If `hf` is missing, Deploy installs
-    `huggingface_hub` with `pip` as an extra step.
-12. **`/workspace` persistence** — whether the template mounts a volume there
-    and how large it is; the model directory, logs and helper files assume it
-    survives a pod restart.
-13. **`VLLM_API_KEY` from the environment** — confirm the installed vLLM reads
+10. **Clean vLLM install on the base image** — run the install step once by
+    hand on a pod (`uv venv /workspace/venv --python 3.12`, then
+    `uv pip install vllm huggingface_hub`) and record the installed size, the
+    time it takes, the PyTorch/CUDA build it selects and whether `vllm serve`
+    starts with driver 595 / CUDA 13.2. Pin the vLLM version that works in the
+    default profile, and confirm it knows the `qwen3_coder` tool parser and the
+    `qwen3` reasoning parser.
+11. **Model size and disk figure** — the 80 GB container-disk recommendation
+    assumes about 30 GB of weights for `Qwen/Qwen3.8-27B-FP8`; replace it with
+    the size reported by the Hugging Face API, which preflight uses anyway.
+12. **Target GPU** — which GPU type the real deployments will use. The probed
+    pod (24 GB, 31 GB container RAM) cannot hold the default model; the
+    reference report was taken on an RTX PRO 6000.
+13. **Download accelerator** — which of `hf_transfer` / `hf_xet` the installed
+    `huggingface_hub` actually uses, and whether a missing package makes
+    `hf download` fail when the image's variables are set.
+14. **Host key stability** — whether the pod's SSH host key changes when a pod
+    is stopped and resumed, which decides how often the fingerprint prompt
+    appears.
+15. **`VLLM_API_KEY` from the environment** — confirm the installed vLLM reads
     the key from the environment variable; otherwise fall back to a config
     file passed with `--config`, still keeping it off the command line.
-14. **Hugging Face token** — whether any profile you plan to use needs a gated
+16. **Hugging Face token** — whether any profile you plan to use needs a gated
     repo; the default one does not.
