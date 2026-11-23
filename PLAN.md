@@ -34,8 +34,10 @@ the monitoring helper, starts vLLM and shows the progress and the vLLM log.
 
 vLLM runs in a Runpod pod started by hand from the plain Ubuntu 24.04 template
 `runpod/base:2.1.0-cuda1320-ubuntu2404`, which contains no vLLM. The proxy
-installs and starts it there (section 12) with the command of the selected
-deployment profile; the default profile is:
+installs and starts it there (section 12). The model variant, the number of
+GPUs and the context length are chosen per pod from the selected deployment
+profile (section 12.3), so the command differs between pods. A typical one,
+for the FP8 variant on a single GPU:
 
 ```bash
 vllm serve /workspace/qwen3.8-27b-fp8 \
@@ -57,7 +59,7 @@ What this implies for the proxy:
 |---|---|
 | One model, served as `dev-test` | Proxy advertises one model; Ollama-style names (`dev-test:latest`, aliases) must map onto it |
 | `--api-key` | Proxy injects `Authorization: Bearer $VLLM_API_KEY`; clients never see this key and use proxy-issued keys instead |
-| `--max-model-len 65536` | Reported as context length; `num_ctx` from clients cannot change it |
+| `--max-model-len` is decided at deploy time | The proxy reports the deployed value as context length; `num_ctx` from clients cannot change it |
 | `--enable-auto-tool-choice` + `qwen3_coder` parser | Tool calls arrive in OpenAI format and must be converted to Ollama format |
 | `--reasoning-parser qwen3` | Reasoning arrives in a separate field and maps to Ollama's `thinking` |
 | `--enable-prefix-caching` | Proxy must keep message/prompt prefixes byte-stable (no reordering, no injected timestamps) to preserve cache hits |
@@ -342,7 +344,7 @@ One file, `DATA_DIR/proxy.sqlite3`, opened in WAL mode with
 | `inventory` | `ts`, `kind`, `data` (JSON) — GPU identities and limits, driver/CUDA, vLLM version and cache config, vLLM startup lines; a row is written only when the content changes |
 | `pod` | The current pod connection: SSH host, port, user, key path, pinned host-key fingerprint, last connection state |
 | `profiles` | Deployment profiles (section 12.3) |
-| `deployments` | One row per Deploy click: profile snapshot, start/end time, final state, and per-step status with timestamps |
+| `deployments` | One row per Deploy click: profile and fit-plan snapshot (variant, GPUs, tensor-parallel size, context), deployment label, start/end time, final state, and per-step status with timestamps |
 | `secrets` | The generated vLLM API key and optional Hugging Face token (see below) |
 | `state` | Key/value settings such as the admin token hash and counters for rejected requests |
 
@@ -510,8 +512,9 @@ You:
 1. Start a pod in the Runpod console with these settings:
    - Template **Ubuntu 24.04**, image `runpod/base:2.1.0-cuda1320-ubuntu2404`.
    - **Container disk**: model size + 25 GB (about 9 GB for the vLLM
-     environment, the rest for caches, logs and headroom). For the default
-     profile use **80 GB**; the Pod page shows the figure for each profile.
+     environment, the rest for caches, logs and headroom). Use **100 GB** if you
+     want the default profile to work with either variant (BF16 weights are
+     about 54 GB); the Pod page shows the figure per profile and variant.
      No network volume.
    - **Expose only TCP port 22.** Remove the HTTP ports: the image also runs
      JupyterLab, nginx and a web terminal, which are not needed and should not
@@ -551,31 +554,95 @@ detection and log display.
 | Environment sets `HF_HUB_ENABLE_HF_TRANSFER` and `HF_XET_HIGH_PERFORMANCE` | The download step installs the matching accelerator packages and sets its own Hugging Face variables explicitly instead of inheriting them |
 | `RUNPOD_POD_ID`, `RUNPOD_DC_ID`, `RUNPOD_GPU_NAME`, `RUNPOD_GPU_COUNT`, `RUNPOD_MEM_GB`, `RUNPOD_CPU_COUNT` available | Recorded (values of these six only) in the inventory and shown in the report header |
 | All `nvidia-smi --query-gpu` fields used by the helper and `nvidia-smi dmon -s t` work | The GPU helper from confidential-inference-test runs unchanged |
-| Target hardware is one RTX PRO 6000; the first probe ran on an RTX PRO 4000 Blackwell with 24 GB | Profiles are written for a single GPU (no `--tensor-parallel-size`). Preflight still compares GPU memory with the model size and stops before downloading, so a pod rented with the wrong GPU fails fast |
+| The GPU varies with availability (the probes ran on an RTX PRO 4000 Blackwell with 24 GB and on a larger pod) | Nothing about the GPU is fixed in a profile; variant, tensor-parallel size and context are chosen per pod (section 12.3) |
 
-### 12.3 Deployment profiles
+### 12.3 Deployment profiles and hardware fit
 
-Stored in SQLite and edited in the UI. A profile is structured, not a free-form
-command, so the proxy always knows the model name and context length.
+The GPU is not known in advance: it may be one RTX PRO 6000, one or two
+RTX 6000 Ada, an H100, two A40 and so on, and the right quantization — or the
+right model — depends on what was available. A profile therefore describes
+**what you want to serve**, and Deploy works out **how to run it on the pod it
+finds**.
 
-| Field | Default profile (`qwen3.8-27b-fp8`) |
+**A profile** (stored in SQLite, edited in the UI, structured rather than a
+free-form command):
+
+| Field | Default profile (`qwen3.8-27b`) |
 |---|---|
-| Hugging Face repo, optional revision | `Qwen/Qwen3.8-27B-FP8` |
-| Local directory | `/workspace/qwen3.8-27b-fp8` |
 | Served model name | `dev-test` |
-| Max model length | `65536` |
-| Extra vLLM arguments (ordered flag/value list) | `--kv-cache-dtype fp8`, `--enable-prefix-caching`, `--enable-auto-tool-choice`, `--tool-call-parser qwen3_coder`, `--reasoning-parser qwen3` |
+| Variants, in order of preference | 1. `Qwen/Qwen3.8-27B` (BF16) → `/workspace/qwen3.8-27b-bf16`<br>2. `Qwen/Qwen3.8-27B-FP8` (FP8) → `/workspace/qwen3.8-27b-fp8` |
+| Context length: wanted / minimum acceptable | `131072` / `65536` |
+| Common vLLM arguments (ordered flag/value list) | `--enable-prefix-caching`, `--enable-auto-tool-choice`, `--tool-call-parser qwen3_coder`, `--reasoning-parser qwen3` |
+| Per-variant extra arguments | FP8 variant: `--kv-cache-dtype fp8` |
+| GPU memory utilization | vLLM default (overridable) |
 | vLLM version | `0.34.0` (the version verified on this image; editable per profile) |
 | Python version for the environment | `3.12` |
 | Extra environment variables | none |
 | Needs Hugging Face token | no |
 
-`--host 127.0.0.1`, `--port 8000`, `--served-model-name`, `--max-model-len` and
-the API key are always set by the application and cannot be overridden through
-the extra arguments, so a profile can never expose vLLM on a public interface
-or run it without a key. Profiles can be created, duplicated, edited and
-deleted; the page shows the exact command a profile will run before you deploy
-it. Each deployment stores a snapshot of the profile it used.
+A variant is one Hugging Face repo (with optional revision) plus a label and a
+local directory. A profile with a single variant behaves like a fixed
+configuration. A smaller model is simply another profile; several profiles can
+share the served name `dev-test`, so clients need no change when the model
+behind it changes.
+
+**The fit plan.** After connecting, and again as the first step of Deploy, the
+application reads the pod's GPUs (count, model, memory each, compute
+capability) and evaluates every variant of the selected profile:
+
+| Quantity | Source |
+|---|---|
+| Weight size | Sum of the weight files reported by the Hugging Face API for the repo |
+| Tensor-parallel size | Number of identical GPUs, limited to a count vLLM accepts (1, 2, 4, 8). Set as `--tensor-parallel-size` automatically; mixed GPUs use the largest identical group via `CUDA_VISIBLE_DEVICES` |
+| Usable GPU memory | Sum over the GPUs used × GPU memory utilization, minus a fixed per-GPU overhead |
+| Memory left for the KV cache | Usable memory − weight size |
+| KV cache cost per token | From the repo's `config.json` (layers, KV heads, head dimension) and the KV-cache dtype |
+| Largest context that fits | KV memory ÷ cost per token, capped at the wanted context |
+| Disk needed | Weight size + environment + margin, against free container disk |
+
+A variant **fits** when its weights load and the largest context is at least
+the profile's minimum. Auto-selection takes the first fitting variant in
+preference order and the largest context up to the wanted one, so the same
+profile gives BF16 on one RTX PRO 6000 or two 48 GB cards and falls back to
+FP8 on a single 48 GB card, without editing anything.
+
+The page shows the plan as a table — one row per variant with weight size,
+tensor-parallel size, memory left for KV cache, resulting context, disk and a
+verdict with the reason — with the automatic choice preselected. You can pick
+another row, change the context or force a tensor-parallel size before
+clicking Deploy; a choice the estimate rejects needs an explicit "deploy
+anyway". The exact `vllm serve` command for the chosen row is displayed.
+
+The numbers are estimates used to choose and to fail early. vLLM makes the
+real decision at startup: if it reports that the context does not fit its KV
+cache, Deploy reads the limit from the log, and offers to restart with that
+context (automatic when it is still above the profile's minimum).
+
+**Sizing help before renting.** The same calculation runs without a pod: the
+Pod page has a small table of common GPU configurations (editable list: 1× and
+2× RTX PRO 6000, RTX 6000 Ada, A40, H100, …) against the profile's variants,
+showing which variant and context each would get and the container disk to
+request. That is where the "container disk" figure in 12.1 comes from.
+
+**FP8 on older GPUs.** FP8 checkpoints use 8-bit activations only on GPUs that
+support it (Ada, Hopper, Blackwell). On Ampere cards such as the A40, vLLM
+keeps the weights in 8 bits but computes with 16-bit activations, so memory
+savings remain and speed differs (see `Weight-only fallback.md` in
+confidential-inference-test). The plan table flags this from the GPU's compute
+capability as a note, not as a failure.
+
+**What a deployment records.** The chosen variant, GPU model and count,
+tensor-parallel size and context are stored with the deployment and combined
+into a label of the same form as the reference reports, for example
+`rtx-pro-6000x1-qwen38-27b-bf16-131072`. The label is the title of the session
+report, and the actual context becomes the value reported by `/api/show`.
+
+`--host 127.0.0.1`, `--port 8000`, `--served-model-name`, `--max-model-len`,
+`--tensor-parallel-size` and the API key are always set by the application and
+cannot be overridden through the extra arguments, so a profile can never
+expose vLLM on a public interface or run it without a key. Profiles can be
+created, duplicated, edited and deleted. Each deployment stores a snapshot of
+the profile and of the plan it used.
 
 ### 12.4 SSH connection and tunnel
 
@@ -603,13 +670,13 @@ recorded in `deployments`.
 | # | Step | Detail |
 |---|---|---|
 | 1 | Connect | Open or reuse the SSH connection, verify the pinned host key |
-| 2 | Preflight | GPUs and total GPU memory against the model size; free container disk against model size + environment; container memory limit; `/dev/shm`; `uv` and the profile's Python version present; ports 8000 and 9400 free or held by our own processes; `huggingface.co` and `pypi.org` reachable. Problems stop the deployment here with a specific message, before anything is downloaded |
+| 2 | Preflight and plan | Read the GPUs and compute the fit plan (section 12.3); confirm the variant chosen on the page still fits, and stop before anything is downloaded if it does not. Also: free container disk against model size + environment; container memory limit; `/dev/shm`; `uv` and the profile's Python version present; ports 8000 and 9400 free or held by our own processes; `huggingface.co` and `pypi.org` reachable. Problems stop the deployment here with a specific message, before anything is downloaded |
 | 3 | Install helper | Upload `gpu_exporter.py` and the launcher scripts by SFTP to `/workspace/ovp/`, start the helper on `127.0.0.1:9400` with the system `python3`, check its `/healthz` through the tunnel. Done first so GPU and disk activity are visible during the rest |
 | 4 | Install vLLM | `uv venv /workspace/venv --python <version>`, then `uv pip install --no-cache` of `vllm==<profile version>`, `huggingface_hub` and the download accelerators into it (about 1 min 40 s, 9 GB). Verified with `vllm --version`; the installed versions of vLLM, PyTorch and transformers go to the inventory. Skipped when the environment already has the requested version |
-| 5 | Download model | `hf download <repo> --local-dir <dir>` from the environment; resumable, and near-instant when the files are already present. Progress is the downloaded size against the repo size |
+| 5 | Download model | `hf download <repo> --local-dir <dir>` for the chosen variant only; resumable, and near-instant when the files are already present. Progress is the downloaded size against the repo size |
 | 6 | Write secrets | Generate a fresh vLLM API key locally, write it (and the Hugging Face token if the profile needs one) to `/workspace/ovp/vllm.env`, mode `0600` |
-| 7 | Start vLLM | `vllm serve <dir> ...` from the profile, output to `/workspace/vllm.log` |
-| 8 | Wait until ready | Poll `/health` through the tunnel while streaming the log; fail at once, showing the last log lines, if the process exits |
+| 7 | Start vLLM | `vllm serve <dir> ...` built from the profile and the plan (variant, tensor-parallel size, context), output to `/workspace/vllm.log` |
+| 8 | Wait until ready | Poll `/health` through the tunnel while streaming the log; fail at once, showing the last log lines, if the process exits. A "context does not fit" exit triggers the restart-with-smaller-context path of section 12.3 |
 | 9 | Activate | Read `/v1/models`, check the served name and max model length against the profile, switch the proxy to this backend |
 
 Steps 4 and 5 run in parallel, since both are network-bound and independent;
@@ -666,7 +733,8 @@ download), **Disconnect** (closes SSH, leaves the pod running) and
 | `POST /admin/api/pod/connect` `{"accept_fingerprint"?}` | Connect; returns the fingerprint to confirm on first use |
 | `POST /admin/api/pod/disconnect` | Close the SSH connection |
 | `GET/POST /admin/api/profiles`, `PUT/DELETE /admin/api/profiles/{id}` | Profile CRUD |
-| `POST /admin/api/deploy` `{"profile_id"}` | Start a deployment |
+| `GET /admin/api/profiles/{id}/plan` | Fit plan for the connected pod, or for a hypothetical GPU configuration given as `?gpu=&count=` |
+| `POST /admin/api/deploy` `{"profile_id", "variant"?, "context"?, "tensor_parallel"?, "force"?}` | Start a deployment; without the optional fields the automatic plan is used |
 | `POST /admin/api/deploy/cancel` | Cancel the running deployment |
 | `POST /admin/api/vllm/stop`, `POST /admin/api/vllm/restart` | Stop or restart vLLM |
 | `GET /admin/api/deploy/status` | Backend state, current deployment and step statuses |
@@ -688,7 +756,8 @@ src/ollama_vllm_proxy/
   sampler.py                # vLLM /metrics scraper, inventory collection
   pod/
     ssh.py                  # asyncssh connection, host-key pinning, reconnect, port forwards
-    profiles.py             # profile model, validation, command builder
+    profiles.py             # profile and variant model, validation, command builder
+    fit.py                  # GPU detection, weight and KV-cache estimates, variant selection
     deploy.py               # deployment state machine, steps, resume
     logs.py                 # remote tail → SSE, redaction
     remote/                 # files uploaded to the pod
@@ -722,7 +791,8 @@ src/ollama_vllm_proxy/
 tests/
   unit/                     # translation tables, tool-call accumulation, name resolution,
                             # key hashing, metrics and nvidia-smi parsers, percentile maths,
-                            # profile validation and command building
+                            # profile validation and command building, fit plan for
+                            # a table of GPU configurations and model configs
   integration/              # app + respx-mocked vLLM, streaming and error paths
   e2e/                      # opt-in, against a live vLLM
 deploy/ollama-vllm-proxy.service   # systemd user unit for Linux; macOS runs it with `uv run`
@@ -741,7 +811,8 @@ deploy/ollama-vllm-proxy.service   # systemd user unit for Linux; macOS runs it 
    by hand on the pod is reachable through the proxy's own tunnel.
 5. **Profiles and Deploy** — profile CRUD, command builder, deployment steps
    with detached remote processes and resume, vLLM and helper installation,
-   Stop and Restart. *Check*: on a fresh pod, one click ends in state `ready`; killing
+   Stop and Restart, and the fit plan (variant, tensor-parallel size and
+   context chosen from the pod's GPUs). *Check*: on a fresh pod, one click ends in state `ready`; killing
    the proxy mid-download and restarting it resumes the same deployment.
 6. **Pod page** — step list, download progress, live log panel.
    *Check*: the vLLM log scrolls live in the browser during model load.
@@ -795,7 +866,10 @@ deploy/ollama-vllm-proxy.service   # systemd user unit for Linux; macOS runs it 
   (an sshd container with a stub `uv`, `vllm`, `hf` and `nvidia-smi` on the path):
   host-key confirmation and mismatch, every step's success and failure path,
   resume after a dropped connection and after a proxy restart, cancel, Stop and
-  Restart, redeploy idempotence, profile switch. Assertions that the vLLM key
+  Restart, redeploy idempotence, profile switch; stub `nvidia-smi` outputs
+  for 1× and 2× GPU pods of several sizes, checking the variant, the
+  tensor-parallel size and the context in the resulting command, and the
+  restart with a smaller context when the stub vLLM rejects the first one. Assertions that the vLLM key
   never appears in a remote command line, a log relayed to the browser, an API
   response or a local log, and that hostile profile values (quotes, `;`, `$()`)
   are rejected or passed as inert arguments.
@@ -832,12 +906,15 @@ deploy/ollama-vllm-proxy.service   # systemd user unit for Linux; macOS runs it 
    versions; pin the series used by the charts against the installed build.
 9. **`/metrics` and `/version` authentication** — whether the installed vLLM
    requires the API key on these routes (the proxy sends it either way).
-10. **Model size and disk figure** — the 80 GB container-disk recommendation
-    assumes about 30 GB of weights for `Qwen/Qwen3.8-27B-FP8`; replace it with
-    the size reported by the Hugging Face API, which preflight uses anyway.
-11. **First start on the RTX PRO 6000** — confirm that the default profile
-    loads and serves with vLLM 0.34.0 / PyTorch 2.14.0+cu130 on driver 595,
-    and note the load time for the readiness timeout.
+10. **Model size and disk figure** — the 100 GB container-disk recommendation
+    assumes about 54 GB of BF16 weights (the figure from the reference
+    project's notes); the fit plan replaces it with the sizes reported by the
+    Hugging Face API.
+11. **Fit estimate calibration** — the per-GPU overhead and the KV-cache cost
+    per token are estimates; compare them with what vLLM logs at startup
+    (KV cache size, maximum concurrency) on the first real deployments of each
+    GPU type and adjust the constants. The reference runs give two data points:
+    BF16 on 1× RTX PRO 6000 at 131072 and on 2× RTX A6000.
 12. **Download accelerator** — which of `hf_transfer` / `hf_xet` the installed
     `huggingface_hub` actually uses, and whether a missing package makes
     `hf download` fail when the image's variables are set.
@@ -849,3 +926,12 @@ deploy/ollama-vllm-proxy.service   # systemd user unit for Linux; macOS runs it 
     file passed with `--config`, still keeping it off the command line.
 15. **Hugging Face token** — whether any profile you plan to use needs a gated
     repo; the default one does not.
+16. **Tensor parallelism on two GPUs** — confirm with vLLM 0.34.0 that the
+    default model starts with `--tensor-parallel-size 2` on 2× 48 GB cards,
+    and what `/dev/shm` size it needs (the pods seen so far had 14–19 GB).
+17. **FP8 KV cache on Ampere** — whether `--kv-cache-dtype fp8` is accepted on
+    A40-class GPUs; if not, the plan drops that argument there and counts the
+    KV cache at 16 bits.
+18. **Exact repo names and sizes** of the variants in the default profile
+    (`Qwen/Qwen3.8-27B`, `Qwen/Qwen3.8-27B-FP8`), read from the Hugging Face
+    API when the profile is first loaded.
