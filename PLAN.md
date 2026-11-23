@@ -539,7 +539,7 @@ detection and log display.
 | `vllm`, `hf` not installed | Deploy installs both into a dedicated virtual environment |
 | Measured install: `uv venv --python 3.12` + `uv pip install vllm huggingface_hub` takes 1 min 41 s and gives vLLM 0.34.0 with PyTorch 2.14.0+cu130; `torch.cuda.is_available()` is true | The install step is short next to the download; no custom PyTorch index or CUDA setup is needed |
 | The environment is 8.9 GB, but the disk grew by 18 GB because `uv` keeps a second copy in its cache | The install runs with `--no-cache`, so the environment costs about 9 GB, not 18 |
-| vLLM 0.34.0 lists `qwen3_coder` among its tool-call parsers | The default profile's tool parser is valid for the pinned version |
+| vLLM 0.34.0 registers `qwen3_coder` as a tool-call parser and `qwen3` as a reasoning parser | Both parsers of the default profile are valid for the pinned version |
 | Driver 595.112.07, CUDA 13.2 libraries and cuDNN 9 in the image | New enough for current PyTorch wheels, which bundle their own CUDA runtime |
 | `/workspace` is a plain directory on the 30 GB container overlay, not a volume | Disk size is whatever you set as container disk; nothing persists. Paths stay under `/workspace` for consistency |
 | Container memory limit is 31 GB although `free` reports 125 GB | Preflight reads the cgroup limit (`/sys/fs/cgroup/memory.max`), not `free` |
@@ -832,24 +832,20 @@ deploy/ollama-vllm-proxy.service   # systemd user unit for Linux; macOS runs it 
    versions; pin the series used by the charts against the installed build.
 9. **`/metrics` and `/version` authentication** — whether the installed vLLM
    requires the API key on these routes (the proxy sends it either way).
-10. **Reasoning parser name** — vLLM 0.34.0 does not list the accepted values
-    of `--reasoning-parser` in its help, so `qwen3` is still unconfirmed for
-    this version. It is checked the first time vLLM starts; an invalid name
-    makes vLLM exit at once, which Deploy reports with the log lines.
-11. **Model size and disk figure** — the 80 GB container-disk recommendation
+10. **Model size and disk figure** — the 80 GB container-disk recommendation
     assumes about 30 GB of weights for `Qwen/Qwen3.8-27B-FP8`; replace it with
     the size reported by the Hugging Face API, which preflight uses anyway.
-12. **First start on the RTX PRO 6000** — confirm that the default profile
+11. **First start on the RTX PRO 6000** — confirm that the default profile
     loads and serves with vLLM 0.34.0 / PyTorch 2.14.0+cu130 on driver 595,
     and note the load time for the readiness timeout.
-13. **Download accelerator** — which of `hf_transfer` / `hf_xet` the installed
+12. **Download accelerator** — which of `hf_transfer` / `hf_xet` the installed
     `huggingface_hub` actually uses, and whether a missing package makes
     `hf download` fail when the image's variables are set.
-14. **Host key stability** — whether the pod's SSH host key changes when a pod
+13. **Host key stability** — whether the pod's SSH host key changes when a pod
     is stopped and resumed, which decides how often the fingerprint prompt
     appears.
-15. **`VLLM_API_KEY` from the environment** — confirm the installed vLLM reads
+14. **`VLLM_API_KEY` from the environment** — confirm the installed vLLM reads
     the key from the environment variable; otherwise fall back to a config
     file passed with `--config`, still keeping it off the command line.
-16. **Hugging Face token** — whether any profile you plan to use needs a gated
+15. **Hugging Face token** — whether any profile you plan to use needs a gated
     repo; the default one does not.
