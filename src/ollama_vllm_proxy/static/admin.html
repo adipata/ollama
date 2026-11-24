@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>API keys · Ollama → vLLM proxy</title>
+<link rel="stylesheet" href="/admin/static/common.css">
+</head>
+<body>
+<section id="login" class="card hidden">
+  <h1>Admin token required</h1>
+  <p class="muted">Paste the contents of <code>admin_token.txt</code> from the proxy's data directory. It is kept only in this browser tab.</p>
+  <form class="row">
+    <input class="grow" type="password" autocomplete="off" aria-label="Admin token" placeholder="adm-…">
+    <button class="primary" type="submit">Continue</button>
+  </form>
+</section>
+
+<main class="hidden">
+  <h1>API keys</h1>
+  <p class="muted">Every call to <code>/api</code> and <code>/v1</code> must carry one of these keys as <code>Authorization: Bearer &lt;key&gt;</code>.</p>
+
+  <div id="message" class="notice bad hidden" role="alert"></div>
+
+  <section id="created" class="card hidden" aria-live="polite">
+    <h2>Key created — copy it now</h2>
+    <p>This is the only time the full key is shown. It cannot be recovered later.</p>
+    <div class="row">
+      <code id="created-key" class="grow"></code>
+      <button type="button" id="copy-key">Copy</button>
+      <button type="button" id="dismiss-key">Done</button>
+    </div>
+    <h3 style="margin-top:14px">Client examples</h3>
+    <pre class="block" id="snippet"></pre>
+  </section>
+
+  <section class="card">
+    <h2>Create a key</h2>
+    <form id="create" class="row">
+      <div class="grow">
+        <label for="key-name">Name (who or what will use it)</label>
+        <input id="key-name" type="text" maxlength="64" required pattern="[A-Za-z0-9][A-Za-z0-9._:\-]{0,63}" placeholder="e.g. laptop-openwebui" style="width:100%">
+      </div>
+      <button class="primary" type="submit" style="align-self:flex-end">Create key</button>
+    </form>
+  </section>
+
+  <section class="card">
+    <h2>Keys</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Name</th><th>Key</th><th>Status</th><th>Created</th><th>Actions</th></tr></thead>
+        <tbody id="keys"></tbody>
+      </table>
+    </div>
+    <p id="empty" class="muted hidden" style="margin-top:10px">No keys yet. Until you create one, every inference call is rejected.</p>
+  </section>
+</main>
+<script src="/admin/static/common.js"></script>
+<script src="/admin/static/admin.js"></script>
+</body>
+</html>
