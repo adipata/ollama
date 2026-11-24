@@ -36,6 +36,25 @@ from the address bar and keeps it only in that browser tab.
 | `/admin/pod` | Connect to the pod, choose a deployment profile, deploy vLLM, watch the log |
 | `/admin/monitor` | Live monitoring and report download |
 
+## Deploying vLLM on a Runpod pod
+
+1. In the Runpod console start a pod from the **Ubuntu 24.04** template
+   (`runpod/base:2.1.0-cuda1320-ubuntu2404`), with a container disk of the
+   model size + 25 GB (100 GB covers both variants of the default profile),
+   no network volume, and only TCP port 22 exposed.
+2. On `/admin/pod`, paste the command Runpod shows under
+   **Connect → SSH over exposed TCP**, for example
+   `ssh root@213.173.99.7 -p 10909 -i ~/.ssh/id_ed25519`, click **Connect** and
+   confirm the host-key fingerprint.
+3. Pick a profile. The page shows which model variant, GPU split and context
+   length fit the pod's GPUs. Click **Deploy** and follow the steps and the log.
+4. Terminate the pod in the Runpod console when you are done. Stopping vLLM
+   does not stop the billing, and the proxy cannot terminate the pod.
+
+The proxy keeps its own SSH tunnel to the pod, so no `ssh -L` command is
+needed. Each deployment generates a fresh vLLM API key that only the proxy
+knows. A Hugging Face token for gated models can be saved on the same page.
+
 ## Using it from clients
 
 Every `/api` and `/v1` call needs `Authorization: Bearer <key>` (or
@@ -91,6 +110,10 @@ Environment variables, or a `.env` file in the working directory.
 | `LOG_LEVEL` | `info` | |
 | `VLLM_BASE_URL`, `VLLM_API_KEY` | empty | *External mode*: use an already running vLLM and disable pod management |
 | `GPU_EXPORTER_URL` | empty | External mode only: URL of a GPU helper |
+| `POD_REMOTE_ROOT` | `/workspace` | Directory on the pod for the environment, models and logs |
+| `POD_VLLM_PORT` / `POD_HELPER_PORT` | `8000` / `9400` | Ports used inside the pod (loopback only) |
+| `POD_READY_TIMEOUT_S` | `1800` | How long Deploy waits for vLLM to load the model |
+| `POD_HF_ENDPOINT` | `https://huggingface.co` | Hugging Face API used for model sizes |
 
 The database holds the vLLM API key and the Hugging Face token in clear text
 (they have to be usable), so `data/` is created with owner-only permissions.

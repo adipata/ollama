@@ -12,8 +12,8 @@ if ! pid=$(job_pid "$name" "$ovp"); then
 fi
 kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null
 i=0
-while kill -0 "$pid" 2>/dev/null && [ "$i" -lt $((grace * 5)) ]; do sleep 0.2; i=$((i + 1)); done
-if kill -0 "$pid" 2>/dev/null; then
+while pid_alive "$pid" && [ "$i" -lt $((grace * 5)) ]; do sleep 0.2; i=$((i + 1)); done
+if pid_alive "$pid"; then
   kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null
   sleep 0.2
 fi

@@ -24,9 +24,10 @@ class Rig:
         self.hf = FakeHF()
         self.boots = 0
 
-    async def start(self) -> "Rig":
+    async def start(self) -> Rig:
         await self.pod.start()
         self.boot()
+        await self.mgr.startup()
         return self
 
     def boot(self) -> None:

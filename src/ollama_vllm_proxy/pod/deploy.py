@@ -23,9 +23,10 @@ import os
 import re
 import secrets as pysecrets
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 import httpx
 
@@ -88,7 +89,7 @@ class PodSettings:
     stop_grace_s: int = 20
 
     @classmethod
-    def from_env(cls) -> "PodSettings":
+    def from_env(cls) -> PodSettings:
         e = os.environ
         out = cls(
             remote_root=e.get("POD_REMOTE_ROOT", "/workspace").rstrip("/") or "/workspace",
@@ -912,7 +913,7 @@ class PodManager:
         result = await self._r(self._script("preflight.sh", cfg.remote_root, cfg.venv, data["python_version"],
                                             cfg.vllm_port, cfg.helper_port), timeout=90)
         facts = parse_kv(result.stdout)
-        one = lambda key, default="": (facts.get(key) or [default])[0]  # noqa: E731
+        one = lambda key, default="": (facts.get(key) or [default])[0]
 
         if one("nvidia_smi") != "ok":
             detail = "; ".join(facts.get("nvidia_smi_error", [])) or "nvidia-smi is not available"
@@ -960,8 +961,9 @@ class PodManager:
         label = request.get("variant") or table["auto"]
         if label is None:
             if not force:
-                raise StepFailed("no variant of this profile fits this pod (see the plan); choose a variant and "
-                                 "'deploy anyway' to try regardless")
+                reasons = "; ".join(f"{r['variant']}: {r['reason']}" for r in table["rows"])
+                raise StepFailed(f"no variant of this profile fits this pod ({reasons}). Choose a variant and "
+                                 "'deploy anyway' to try regardless.")
             label = variants[0]["label"]
         variant = next(v for v in variants if v["label"] == label)
         info = infos.get(label)
@@ -1119,7 +1121,7 @@ class PodManager:
         if version != data["vllm_version"]:
             raise StepFailed(f"the environment has vLLM '{version or 'none'}', expected {data['vllm_version']}")
         log_text = await self._tail(logfile, 60)
-        found = re.findall(r"^OVP_VERSIONS (.+)$", log_text, re.M)
+        found = re.findall(r"^OVP_VERSIONS (.+)$", log_text, re.MULTILINE)
         if found:
             versions = dict(p.split("=", 1) for p in found[-1].split() if "=" in p)
             self.ctx.store.insert("inventory", {"ts": time.time(), "deployment_id": dep.get("label"),
@@ -1245,11 +1247,17 @@ class PodManager:
         cfg, plan, data = self.cfg, dep["plan"], dep["snapshot"]["data"]
         deadline = time.monotonic() + cfg.ready_timeout_s
         retries = 0
+        notes: list[str] = []  # kept above the log tail, which is replaced on every poll
+
+        def show(tail: str) -> None:
+            self._out(step, "\n".join([*notes, tail]).strip(), replace=True)
+
         while True:
             ssh = self.ssh
             resp = await self._http_status(f"{ssh.url('vllm')}/health") if ssh and ssh.up else None
             if resp is not None and resp.status_code == 200:
-                self._out(step, "vLLM answers /health")
+                notes.append("vLLM answers /health")
+                show(await self._tail(cfg.vllm_log, 10))
                 return None
             job = (await self._jobs())["vllm"]
             if not job["alive"]:
@@ -1259,8 +1267,9 @@ class PodManager:
                 if limit and limit < plan["context"]:
                     if limit >= data["context_min"] and retries < 3 and limit >= 1024:
                         retries += 1
-                        self._out(step, f"vLLM reports that a context of {plan['context']:,} does not fit its KV "
-                                        f"cache; restarting with {limit:,}")
+                        notes.append(f"vLLM reports that a context of {plan['context']:,} does not fit its KV "
+                                     f"cache; restarting with {limit:,}")
+                        show("")
                         plan["context"] = limit
                         self._refresh_plan_command(data, plan)
                         dep["label"] = plan["label"]
@@ -1268,11 +1277,11 @@ class PodManager:
                         self._save(dep)
                         continue
                     plan["offer"] = {"context": limit}
-                    self._out(step, last)
+                    show(last)
                     raise StepFailed(f"vLLM reports that the context does not fit: at most {limit:,} tokens, which "
                                      f"is below the profile's minimum of {data['context_min']:,}. "
                                      "You can restart with the smaller context.")
-                self._out(step, last, replace=True)
+                show(last)
                 code = f"exit status {job['exit']}" if job["exit"] is not None else "the process disappeared"
                 raise StepFailed(f"vLLM exited before it was ready ({code}); the last log lines are shown above")
             if time.monotonic() > deadline:
@@ -1280,7 +1289,7 @@ class PodManager:
                                  "running - see the vLLM log, then Restart or Stop it")
             tail = await self._tail(cfg.vllm_log, 10)
             if tail:
-                self._out(step, tail, replace=True)
+                show(tail)
             await asyncio.sleep(min(cfg.poll_interval_s, 2.0))
 
     async def _verify_protected(self, key: str) -> tuple[bool, str, dict[str, Any] | None]:

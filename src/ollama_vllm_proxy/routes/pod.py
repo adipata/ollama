@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
@@ -253,7 +254,7 @@ async def status_events(manager: PodManager, heartbeat: float = 15.0) -> AsyncIt
                 yield b"data: " + text.encode() + b"\n\n"
             try:
                 await asyncio.wait_for(queue.get(), timeout=heartbeat)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 yield b": keep-alive\n\n"
             await asyncio.sleep(0.1)  # coalesce bursts of updates
             while not queue.empty():
@@ -294,6 +295,8 @@ async def logs_download(request: Request) -> Response:
                                        manager.secret_values())
     except SSHError as exc:
         raise PodError(str(exc), 502) from None
+    if request.query_params.get("format") == "json":  # for the page, which fetches with the token in a header
+        return JSONResponse({"source": source, "text": text})
     return Response(text, media_type="text/plain; charset=utf-8", headers={
         "content-disposition": f'attachment; filename="{source}.log"', "cache-control": "no-store"})
 

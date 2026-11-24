@@ -236,7 +236,7 @@ def slug(text: str) -> str:
     return re.sub(r"-{2,}", "-", re.sub(r"[^a-z0-9]+", "-", text.lower())).strip("-")
 
 
-_GPU_NOISE = re.compile(r"\b(nvidia|geforce|quadro|blackwell|generation|workstation edition|server edition)\b", re.I)
+_GPU_NOISE = re.compile(r"\b(nvidia|geforce|quadro|blackwell|generation|workstation edition|server edition)\b", re.IGNORECASE)
 
 
 def gpu_slug(name: str) -> str:

@@ -118,7 +118,7 @@ def parse_gpus(text: str) -> list[Gpu]:
             except ValueError:
                 cap = None
         name = parts[1][:80]
-        gpus.append(Gpu(int(parts[0]), name, int(mem.group(0)), cap, mig=bool(re.search(r"\bMIG\b", name, re.I))))
+        gpus.append(Gpu(int(parts[0]), name, int(mem.group(0)), cap, mig=bool(re.search(r"\bMIG\b", name, re.IGNORECASE))))
     return gpus
 
 

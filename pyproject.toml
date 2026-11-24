@@ -32,3 +32,5 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 110
 target-version = "py311"
+# gpu_exporter.py is vendored unchanged; never reformat it.
+extend-exclude = ["src/ollama_vllm_proxy/pod/remote"]

@@ -25,13 +25,20 @@ ALL_DONE = {s: "done" for s in ("connect", "preflight", "helper", "install", "do
 @pytest.fixture
 async def rig(tmp_path):
     r = await Rig(tmp_path).start()
-    await r.mgr.startup()
     yield r
     await r.close()
 
 
 def step(status, step_id):
     return next(s for s in status["deployment"]["steps"] if s["id"] == step_id)
+
+
+def gone(pid: int) -> bool:
+    """The process is dead (or a zombie nobody reaped yet)."""
+    try:
+        return "\nState:\tZ" in open(f"/proc/{pid}/status").read()
+    except OSError:
+        return True
 
 
 async def chat_ok(rig) -> bool:
@@ -605,8 +612,7 @@ async def test_cancel_kills_the_remote_process(rig):
     assert status["deployment"]["state"] == "cancelled" and not status["busy"]
     assert rig.steps(status)["download"] == "cancelled" and rig.steps(status)["secrets"] == "pending"
     assert rig.pod.job_pid("download") is None
-    with pytest.raises(ProcessLookupError):
-        os.kill(pid, 0)
+    assert gone(pid)
     assert status["backend"]["state"] == "connected" and "cancelled" in status["backend"]["detail"]
     assert rig.pod.records("vllm") == []
     # and a later Deploy resumes the partial download
@@ -624,8 +630,7 @@ async def test_stop_and_restart_vllm(rig):
     status = (await rig.admin.post("/admin/api/vllm/stop")).json()
     assert status["backend"]["state"] == "stopped" and status["deployment"]["state"] == "stopped"
     assert rig.pod.job_pid("vllm") is None
-    with pytest.raises(ProcessLookupError):
-        os.kill(pid, 0)
+    assert gone(pid)
     stopped = await rig.http.post("/api/chat", json=CHAT)
     assert stopped.status_code == 503 and "stopped" in stopped.text
     assert rig.pod.job_pid("helper")  # the helper keeps running
@@ -687,8 +692,7 @@ async def test_profile_switch_stops_the_running_vllm_first(rig):
     assert resp.status_code == 202
     await rig.wait_for(lambda: len(rig.pod.records("hf")) == 2, what="the second download")
     assert rig.pod.job_pid("vllm") is None  # stopped before the new model is even downloaded
-    with pytest.raises(ProcessLookupError):
-        os.kill(pid, 0)
+    assert gone(pid)
     status = await rig.wait_idle()
     assert status["deployment"]["state"] == "ready", status["deployment"]["error"]
     argv = rig.vllm_argv()
@@ -711,7 +715,8 @@ async def test_disconnect_leaves_the_pod_running(rig):
     pid = rig.pod.job_pid("vllm")
     status = (await rig.admin.post("/admin/api/pod/disconnect")).json()
     assert status["backend"]["state"] == "no_pod" and not status["pod"]["connected"]
-    assert rig.pod.job_pid("vllm") == pid and not rig.pod.connections
+    await rig.wait_for(lambda: not rig.pod.connections, what="the SSH connection to close")
+    assert rig.pod.job_pid("vllm") == pid
     assert (await rig.http.post("/api/chat", json=CHAT)).status_code == 503
     # same pod start, key already confirmed: Connect does not ask again and serving resumes
     again = (await rig.admin.post("/admin/api/pod/connect", json={})).json()

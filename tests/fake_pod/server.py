@@ -129,7 +129,7 @@ def hf_http_app(repos: dict[str, dict[str, Any]] | None = None):
 
 
 class _Server(asyncssh.SSHServer):
-    def __init__(self, pod: "FakePod"):
+    def __init__(self, pod: FakePod):
         self.pod = pod
         self.conn: asyncssh.SSHServerConnection | None = None
 
@@ -256,11 +256,13 @@ class FakePod:
 
     async def stop(self) -> None:
         """Stop listening and cut the connections (the pod is unreachable)."""
-        if self._listener is not None:
-            self._listener.close()
-            await self._listener.wait_closed()
-            self._listener = None
+        listener, self._listener = self._listener, None
+        if listener is not None:
+            listener.close()
         self.drop_connections()
+        if listener is not None:
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(listener.wait_closed(), timeout=5)
         await asyncio.sleep(0)
 
     async def new_host_key(self) -> None:
@@ -327,6 +329,8 @@ class FakePod:
         try:
             pid = int((self.root / "ovp" / f"{name}.pid").read_text().strip())
             os.kill(pid, 0)
+            if "\nState:\tZ" in Path(f"/proc/{pid}/status").read_text():
+                return None  # killed, not yet reaped by this machine's init
             return pid
         except (OSError, ValueError):
             return None

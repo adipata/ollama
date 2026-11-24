@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Pod · Ollama → vLLM proxy</title>
+<link rel="stylesheet" href="/admin/static/common.css">
+<link rel="stylesheet" href="/admin/static/pod.css">
+</head>
+<body>
+<section id="login" class="card hidden">
+  <h1>Admin token required</h1>
+  <p class="muted">Paste the contents of <code>admin_token.txt</code> from the proxy's data directory. It is kept only in this browser tab.</p>
+  <form class="row">
+    <input class="grow" type="password" autocomplete="off" aria-label="Admin token" placeholder="adm-…">
+    <button class="primary" type="submit">Continue</button>
+  </form>
+</section>
+
+<main class="hidden">
+  <div class="title-row">
+    <h1>Pod</h1>
+    <div id="state-line" class="state-line" aria-live="polite"><span id="state-pill" class="pill">…</span> <span id="state-text" class="muted"></span></div>
+  </div>
+
+  <div id="message" class="notice bad hidden" role="alert"></div>
+  <div id="external" class="notice warn hidden">
+    <strong>Pod management is disabled.</strong> The proxy runs in external mode (<code>VLLM_BASE_URL</code> is set), so it uses that vLLM server as it is. Remove the variable and restart the proxy to connect and deploy to a Runpod pod from here.
+  </div>
+
+  <section class="card" id="connection">
+    <h2>Connection</h2>
+    <details class="howto">
+      <summary>How to start the pod in the Runpod console</summary>
+      <ul>
+        <li>Template <strong>Ubuntu 24.04</strong> (<code>runpod/base:2.1.0-cuda1320-ubuntu2404</code>), no network volume.</li>
+        <li><strong>Container disk</strong>: model size + 25 GB. <span id="disk-hint">Use 100 GB if either variant of the default profile should work.</span></li>
+        <li><strong>Expose only TCP port 22</strong> and remove the HTTP ports: the image's JupyterLab, nginx and web terminal are not needed.</li>
+        <li>Your public SSH key on the Runpod account.</li>
+        <li>Then copy the command under <strong>Connect → SSH over exposed TCP</strong> and paste it below, unchanged.</li>
+      </ul>
+    </details>
+    <form id="conn-form">
+      <label for="ssh-command">SSH command from Runpod (Connect → SSH over exposed TCP)</label>
+      <div class="row">
+        <input id="ssh-command" class="grow mono" type="text" autocomplete="off" spellcheck="false" maxlength="1024"
+               placeholder="ssh root@213.173.99.7 -p 10909 -i ~/.ssh/id_ed25519">
+        <button class="primary" type="submit" id="connect-btn">Connect</button>
+        <button type="button" id="disconnect-btn" class="hidden">Disconnect</button>
+      </div>
+    </form>
+    <div id="parsed" class="parsed hidden"></div>
+    <div id="conn-error" class="notice bad hidden" role="alert"></div>
+
+    <div id="fingerprint-box" class="notice warn hidden" role="alertdialog" aria-labelledby="fp-title">
+      <h3 id="fp-title">Confirm the pod's host key</h3>
+      <p id="fp-changed" class="hidden"><strong>The pod presents a different key than the one confirmed before.</strong> That is expected after the pod was restarted; otherwise do not continue.</p>
+      <p>Fingerprint presented by <span id="fp-host"></span>:</p>
+      <p><code id="fp-value" class="fp"></code></p>
+      <p class="small muted">Compare it with the output of <code>ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub</code> in the pod's Runpod web terminal. Nothing has been sent to the pod yet; the key is asked for once per pod start.</p>
+      <div class="row">
+        <button class="primary" type="button" id="fp-accept">It matches — connect</button>
+        <button type="button" id="fp-cancel">Cancel</button>
+      </div>
+    </div>
+
+    <div id="connected-box" class="hidden">
+      <p id="pod-summary"></p>
+      <div class="notice warn" id="billing">
+        <strong>This pod is billed until you terminate it in the Runpod console.</strong>
+        Stopping vLLM or disconnecting here does not stop the billing, and the application cannot terminate the pod for you.
+      </div>
+    </div>
+  </section>
+
+  <section class="card" id="hf">
+    <h2>Hugging Face token</h2>
+    <p class="muted small">One token for all downloads; needed only for gated or private repositories. It is stored by the proxy, passed to the pod as <code>HF_TOKEN</code> at deploy time and never shown again.</p>
+    <form id="hf-form" class="row">
+      <span id="hf-status" class="pill">…</span>
+      <input id="hf-token" class="grow" type="password" autocomplete="off" aria-label="Hugging Face token" placeholder="hf_…">
+      <button type="submit" id="hf-save">Save token</button>
+      <button type="button" id="hf-remove" class="danger hidden">Remove</button>
+    </form>
+  </section>
+
+  <section class="card" id="profiles">
+    <h2>Profile</h2>
+    <div class="row">
+      <select id="profile-select" class="grow" aria-label="Deployment profile"></select>
+      <button type="button" id="profile-new">New</button>
+      <button type="button" id="profile-dup">Duplicate</button>
+      <button type="button" id="profile-edit">Edit</button>
+      <button type="button" id="profile-del" class="danger">Delete</button>
+    </div>
+    <dl id="profile-summary" class="summary"></dl>
+
+    <form id="profile-form" class="hidden" novalidate>
+      <h3 id="profile-form-title">Edit profile</h3>
+      <div id="profile-error" class="notice bad hidden" role="alert"></div>
+      <div class="fields">
+        <div><label for="pf-name">Profile name</label><input id="pf-name" type="text" maxlength="64"></div>
+        <div><label for="pf-served">Served model name</label><input id="pf-served" type="text" maxlength="64"></div>
+        <div><label for="pf-ctx">Context wanted (tokens)</label><input id="pf-ctx" type="number" min="1024" step="1024"></div>
+        <div><label for="pf-ctx-min">Minimum acceptable context</label><input id="pf-ctx-min" type="number" min="1024" step="1024"></div>
+        <div><label for="pf-util">GPU memory utilization (empty = vLLM default)</label><input id="pf-util" type="number" min="0.1" max="1" step="0.01"></div>
+        <div><label for="pf-vllm">vLLM version</label><input id="pf-vllm" type="text" maxlength="24"></div>
+        <div><label for="pf-python">Python version</label><input id="pf-python" type="text" maxlength="5"></div>
+      </div>
+      <h3>Variants, in order of preference</h3>
+      <div id="pf-variants"></div>
+      <button type="button" id="pf-add-variant">Add variant</button>
+      <div class="fields two">
+        <div>
+          <label for="pf-args">Common vLLM arguments, one per line (<code>--flag value</code>)</label>
+          <textarea id="pf-args" rows="5" spellcheck="false"></textarea>
+        </div>
+        <div>
+          <label for="pf-env">Extra environment variables, one per line (<code>NAME=value</code>)</label>
+          <textarea id="pf-env" rows="5" spellcheck="false"></textarea>
+        </div>
+      </div>
+      <p class="muted small"><code>--host</code>, <code>--port</code>, <code>--served-model-name</code>, <code>--max-model-len</code>, <code>--tensor-parallel-size</code> and the API key are always set by the application and cannot be given here.</p>
+      <div class="row">
+        <button class="primary" type="submit">Save profile</button>
+        <button type="button" id="pf-cancel">Cancel</button>
+      </div>
+    </form>
+  </section>
+
+  <section class="card" id="plan">
+    <h2>Plan and deploy</h2>
+    <p id="plan-note" class="muted">Connect a pod to see how this profile fits its GPUs.</p>
+    <div id="plan-body" class="hidden">
+      <p id="plan-gpus" class="small"></p>
+      <div class="table-wrap">
+        <table id="plan-table">
+          <thead><tr><th></th><th>Variant</th><th class="num">Weights</th><th class="num">Tensor-parallel</th><th class="num">Left for KV cache</th><th class="num">Context</th><th class="num">Disk needed</th><th>Verdict</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="fields overrides">
+        <div><label for="ov-context">Context (tokens)</label><input id="ov-context" type="number" min="1024" step="1024" placeholder="automatic"></div>
+        <div><label for="ov-tp">Tensor-parallel size</label><select id="ov-tp"></select></div>
+        <div class="check"><label><input id="ov-force" type="checkbox"> Deploy anyway, even if the estimate says it does not fit</label></div>
+      </div>
+      <p class="small muted cmd-label" id="command-label">Command that will run on the pod (the API key is passed in the environment, not here)</p>
+      <pre class="block" id="command" aria-labelledby="command-label"></pre>
+    </div>
+    <div class="row actions">
+      <button class="primary" type="button" id="deploy-btn" disabled>Deploy</button>
+      <button type="button" id="cancel-btn" disabled>Cancel</button>
+      <span class="spacer"></span>
+      <button type="button" id="restart-btn" disabled>Restart vLLM</button>
+      <button type="button" id="stop-btn" disabled>Stop vLLM</button>
+      <button type="button" id="delete-btn" class="danger" disabled>Delete model files</button>
+    </div>
+  </section>
+
+  <section class="card" id="progress">
+    <h2>Deployment</h2>
+    <p id="dep-none" class="muted">Nothing has been deployed yet.</p>
+    <div id="dep-body" class="hidden">
+      <p id="dep-head"></p>
+      <div id="dep-error" class="notice bad hidden"></div>
+      <div id="dep-offer" class="notice warn hidden">
+        <span id="dep-offer-text"></span>
+        <button type="button" id="dep-offer-btn">Restart with this context</button>
+      </div>
+      <ol id="steps" class="steps"></ol>
+    </div>
+  </section>
+
+  <section class="card" id="logs">
+    <h2>Logs</h2>
+    <div class="row">
+      <label for="log-source" class="inline">Source</label>
+      <select id="log-source">
+        <option value="vllm">vLLM</option>
+        <option value="install">Install</option>
+        <option value="download">Download</option>
+        <option value="helper">GPU helper</option>
+      </select>
+      <button type="button" id="log-pause" aria-pressed="false">Pause</button>
+      <label class="inline check"><input type="checkbox" id="log-autoscroll" checked> Auto-scroll</label>
+      <span class="spacer"></span>
+      <span id="log-info" class="muted small"></span>
+      <button type="button" id="log-download">Download full log</button>
+    </div>
+    <pre id="log-view" class="block log" tabindex="0" aria-label="Log output"></pre>
+  </section>
+
+  <section class="card" id="sizing">
+    <h2>Sizing help before renting</h2>
+    <p class="muted small">What each GPU configuration would get with the selected profile, and the container disk to request. It only helps to choose what to rent: a GPU that is not listed deploys the same way, because Deploy uses what the pod reports.</p>
+    <p id="sizing-disk" class="small"></p>
+    <div id="sizing-error" class="notice warn hidden"></div>
+    <div class="table-wrap sizing-wrap">
+      <table id="sizing-table">
+        <thead><tr><th>GPU</th><th>Generation</th><th class="num">Count</th><th>Variant</th><th class="num">Tensor-parallel</th><th class="num">Context</th><th class="num">Container disk</th><th>Note</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <details id="catalog-details">
+      <summary>Edit the GPU catalog</summary>
+      <p class="muted small">A JSON list of <code>{"name", "generation", "memory_gb", "max_count", "mig"}</code>. Ampere-generation and AMD GPUs are not supported and are left out.</p>
+      <div id="catalog-error" class="notice bad hidden" role="alert"></div>
+      <textarea id="catalog-text" rows="10" spellcheck="false" aria-label="GPU catalog (JSON)"></textarea>
+      <div class="row" style="margin-top:8px">
+        <button type="button" id="catalog-save">Save catalog</button>
+        <button type="button" id="catalog-reset">Reset to the default list</button>
+      </div>
+    </details>
+  </section>
+</main>
+<script src="/admin/static/common.js"></script>
+<script src="/admin/static/pod.js"></script>
+</body>
+</html>

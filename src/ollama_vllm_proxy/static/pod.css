@@ -1,0 +1,70 @@
+/* Pod page. Colours and base components come from common.css. */
+.title-row{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;margin:0 0 12px}
+.title-row h1{margin:4px 0 0}
+.state-line{font-size:13.5px}
+.spacer{flex:1}
+label.inline{display:inline-flex;align-items:center;gap:6px;margin:0}
+.check label,label.check{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text-primary);margin:0}
+.howto{margin:0 0 12px;font-size:13px}
+.howto summary,#catalog-details summary{cursor:pointer;color:var(--accent)}
+.howto ul{margin:8px 0 0;padding-left:20px}.howto li{margin:0 0 4px}
+#ssh-command{width:100%}
+.parsed{display:flex;gap:6px 18px;flex-wrap:wrap;margin:10px 0 0;font-size:13px}
+.parsed span b{font-weight:600;color:var(--text-secondary);margin-right:5px}
+.parsed .warn{color:var(--warning);flex-basis:100%}
+#conn-error,#fingerprint-box,#connected-box{margin-top:12px}
+#fingerprint-box h3{margin:0 0 6px}
+.fp{font-size:14px;font-weight:600;word-break:break-all;user-select:all}
+#connected-box .notice{margin:0}
+dl.summary{display:grid;grid-template-columns:max-content 1fr;gap:4px 14px;margin:12px 0 0;font-size:13px}
+dl.summary dt{color:var(--text-secondary)}dl.summary dd{margin:0;min-width:0;overflow-wrap:anywhere}
+.fields{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px 14px;margin:0 0 12px}
+.fields.two{grid-template-columns:repeat(auto-fit,minmax(280px,1fr));margin-top:12px}
+.fields input,.fields select{width:100%}
+.fields .check{align-self:end;padding-bottom:7px}
+.overrides{margin-top:12px}
+#profile-form{margin-top:14px;padding-top:14px;border-top:1px solid var(--grid)}
+.variant{display:grid;grid-template-columns:minmax(80px,.6fr) minmax(160px,1.6fr) minmax(80px,.7fr) minmax(130px,1.2fr) minmax(160px,1.6fr) auto;
+gap:8px;align-items:end;margin:0 0 8px}
+.variant input{width:100%}
+#pf-add-variant{margin:0 0 4px}
+#plan-table input[type=radio]{margin:0}
+#plan-table td.wrap{min-width:220px}
+#plan-table tr.chosen td{background:var(--wash)}
+.actions{margin-top:12px}
+.steps{list-style:none;margin:0;padding:0}
+.steps li{display:grid;grid-template-columns:24px 1fr auto;gap:2px 8px;align-items:baseline;padding:8px 0;border-top:1px solid var(--grid)}
+.steps li:first-child{border-top:0}
+.steps .icon{font-weight:700;text-align:center}
+.steps .name{font-weight:600}
+.steps .when{font-size:12.5px;color:var(--text-muted);font-variant-numeric:tabular-nums;white-space:nowrap}
+.steps .more{grid-column:2 / -1;min-width:0}
+.steps details summary{cursor:pointer;font-size:12.5px;color:var(--text-secondary)}
+.steps pre{margin-top:6px;max-height:220px;overflow:auto;background:var(--page);border:1px solid var(--grid);border-radius:6px;padding:8px}
+.steps li.done .icon,.steps li.skipped .icon{color:var(--good)}
+.steps li.failed .icon{color:var(--critical)}
+.steps li.running .icon{color:var(--accent)}
+.steps li.pending,.steps li.cancelled{color:var(--text-muted)}
+.steps li.pending .name,.steps li.cancelled .name{font-weight:400}
+.bar{height:8px;border-radius:999px;background:var(--wash);overflow:hidden;margin:6px 0 2px;max-width:520px}
+.bar > span{display:block;height:100%;background:var(--accent);border-radius:999px;transition:width .3s}
+.bar-label{font-size:12.5px;color:var(--text-secondary);font-variant-numeric:tabular-nums}
+pre.log{height:340px;overflow:auto;margin-top:10px;white-space:pre-wrap;overflow-wrap:anywhere}
+.sizing-wrap{max-height:380px;overflow:auto;margin:0 0 10px}
+.sizing-wrap thead th{position:sticky;top:0;background:var(--surface-1)}
+#sizing-table td.wrap{min-width:200px;color:var(--text-secondary)}
+#sizing-table tr.no td{color:var(--text-muted)}
+@media (prefers-reduced-motion:reduce){.bar > span{transition:none}}
+@media (max-width:760px){
+  .variant{grid-template-columns:1fr 1fr;padding:8px;border:1px solid var(--grid);border-radius:6px}
+  .actions .spacer{flex-basis:100%;height:0}
+  .steps li{grid-template-columns:20px 1fr}
+  .steps .when{grid-column:2}
+  pre.log{height:260px}
+}
+.cmd-label{margin:0 0 4px}
+.fields input[type=checkbox]{width:auto;flex:none}
+.parsed span,.parsed code,#pod-summary,#dep-head,.steps summary,#log-info,.state-line{overflow-wrap:anywhere;min-width:0}
+.steps li{grid-template-columns:24px minmax(0,1fr) auto}
+dl.summary{grid-template-columns:max-content minmax(0,1fr)}
+@media (max-width:760px){.steps li{grid-template-columns:20px minmax(0,1fr)}dl.summary{grid-template-columns:minmax(0,1fr)}dl.summary dd{margin:0 0 6px}}

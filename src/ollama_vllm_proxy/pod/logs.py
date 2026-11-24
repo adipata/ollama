@@ -9,7 +9,8 @@ import asyncio
 import contextlib
 import json
 import re
-from typing import Any, AsyncIterator, Iterable
+from collections.abc import AsyncIterator, Iterable
+from typing import Any
 
 from .ssh import PodSSH, SSHError
 

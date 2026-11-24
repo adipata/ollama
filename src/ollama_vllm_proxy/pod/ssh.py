@@ -14,8 +14,9 @@ import contextlib
 import logging
 import os
 import shlex
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Sequence
+from typing import Any
 
 import asyncssh
 
@@ -93,7 +94,7 @@ class PodSSH:
             key = await asyncio.wait_for(
                 asyncssh.get_server_host_key(t.host, t.port, config=None), timeout=CONNECT_TIMEOUT
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             raise SSHUnavailable(f"no answer from {t.host}:{t.port} within {CONNECT_TIMEOUT:.0f} s") from None
         except (OSError, asyncssh.Error) as exc:
             raise SSHUnavailable(f"cannot reach {t.host}:{t.port}: {_reason(exc)}") from None
@@ -162,7 +163,7 @@ class PodSSH:
                 f"the pod refused the key {t.key_path} for user {t.user}: check that its public half is on "
                 "your Runpod account"
             ) from None
-        except asyncio.TimeoutError:
+        except TimeoutError:
             raise SSHUnavailable(f"timed out connecting to {t.host}:{t.port}") from None
         except (OSError, asyncssh.Error) as exc:
             raise SSHUnavailable(f"cannot connect to {t.host}:{t.port}: {_reason(exc)}") from None
@@ -273,7 +274,7 @@ class PodSSH:
             return False
         try:
             await asyncio.wait_for(self._up.wait(), timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return False
         return self.up
 
@@ -294,7 +295,7 @@ class PodSSH:
                 conn.run(quote_argv(argv), check=False, input=input, encoding="utf-8", errors="replace"),
                 timeout,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             raise SSHError(f"remote command timed out after {timeout:.0f} s: {argv[0]}") from None
         except (OSError, asyncssh.Error) as exc:
             raise SSHUnavailable(f"the SSH connection failed during a command: {_reason(exc)}") from None
