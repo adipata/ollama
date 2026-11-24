@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Monitoring · Ollama → vLLM proxy</title>
+<link rel="stylesheet" href="/admin/static/common.css">
+<link rel="stylesheet" href="/admin/static/monitor.css">
+</head>
+<body>
+<section id="login" class="card hidden">
+  <h1>Admin token required</h1>
+  <p class="muted">Paste the contents of <code>admin_token.txt</code> from the proxy's data directory. It is kept only in this browser tab.</p>
+  <form class="row">
+    <input class="grow" type="password" autocomplete="off" aria-label="Admin token" placeholder="adm-…">
+    <button class="primary" type="submit">Continue</button>
+  </form>
+</section>
+
+<main class="hidden mon">
+  <div class="mon-head">
+    <h1>Monitoring</h1>
+    <span class="meta" id="meta"></span>
+    <span class="status" id="status" data-state="down" role="status"><span class="icon" aria-hidden="true">✕</span><span id="status-text">Connecting…</span></span>
+  </div>
+
+  <div id="backend-note" class="notice hidden" role="status"></div>
+
+  <div class="controls">
+    <span class="seg" role="group" aria-label="Time window" id="windows"></span>
+    <button type="button" id="pause" aria-pressed="false">Pause</button>
+    <button type="button" id="export-toggle" aria-expanded="false" aria-controls="export">Download report</button>
+    <span class="muted small" id="updated"></span>
+  </div>
+
+  <section class="card hidden" id="export">
+    <div class="card-head"><h2>Download a report</h2><span class="sub">one self-contained file: charts, per-key statistics and every request in the range; metadata only</span></div>
+    <form id="export-form" class="export-form">
+      <div><label for="ex-range">Time range</label><select id="ex-range"></select></div>
+      <div class="ex-custom hidden"><label for="ex-from">From</label><input type="datetime-local" id="ex-from" step="1"></div>
+      <div class="ex-custom hidden"><label for="ex-to">To</label><input type="datetime-local" id="ex-to" step="1"></div>
+      <div><label for="ex-key">API key</label><select id="ex-key"></select></div>
+      <div><label for="ex-session">Session</label><select id="ex-session"></select></div>
+      <div><label for="ex-format">Format</label><select id="ex-format"><option value="html">HTML report</option><option value="json">JSON data</option></select></div>
+      <button class="primary" type="submit" id="ex-go">Download</button>
+    </form>
+    <div class="ex-status" id="ex-status" role="status"></div>
+  </section>
+
+  <div class="tiles" id="tiles"></div>
+
+  <section class="card">
+    <div class="card-head"><h2>In flight</h2><span class="sub">requests the proxy is forwarding right now</span></div>
+    <div class="table-wrap" id="t-flight"></div>
+  </section>
+
+  <section class="card" id="hardware">
+    <div class="card-head"><h2>Hardware and vLLM</h2><span class="sub" id="hw-sub"></span></div>
+    <div id="hw-body"><div class="none">Waiting for data…</div></div>
+  </section>
+
+  <div class="grid">
+    <section class="card" id="c-concurrency"></section>
+    <section class="card" id="c-kv"></section>
+    <section class="card" id="c-output"></section>
+    <section class="card" id="c-prompt"></section>
+    <section class="card" id="c-prefix"></section>
+  </div>
+
+  <div class="grid hidden" id="gpu-charts"></div>
+  <section class="card hidden" id="gpu-summary">
+    <div class="card-head"><h2>Per GPU</h2><span class="sub" id="gpu-sub"></span></div>
+    <div class="table-wrap" id="t-gpus"></div>
+  </section>
+
+  <section class="card" id="c-first"></section>
+
+  <section class="card">
+    <div class="card-head"><h2>Per key</h2><span class="sub" id="keys-sub"></span></div>
+    <div class="table-wrap" id="t-keys"></div>
+  </section>
+  <section class="card">
+    <div class="card-head"><h2>Recent requests</h2><span class="sub">newest first, last 30 in the window</span></div>
+    <div class="table-wrap" id="t-recent"></div>
+  </section>
+</main>
+<script src="/admin/static/common.js"></script>
+<script src="/admin/static/monitor.js"></script>
+</body>
+</html>

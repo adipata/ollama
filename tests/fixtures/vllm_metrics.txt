@@ -1,0 +1,28 @@
+# HELP python_gc_objects_collected_total Objects collected during gc
+# TYPE python_gc_objects_collected_total counter
+python_gc_objects_collected_total{generation="0"} 12345.0
+# HELP vllm:num_requests_running Number of requests currently running on GPU.
+# TYPE vllm:num_requests_running gauge
+vllm:num_requests_running{engine="0",model_name="/workspace/qwen3.8-27b-bf16"} 3.0
+# TYPE vllm:num_requests_waiting gauge
+vllm:num_requests_waiting{engine="0",model_name="/workspace/qwen3.8-27b-bf16"} 1.0
+# TYPE vllm:kv_cache_usage_perc gauge
+vllm:kv_cache_usage_perc{engine="0",model_name="/workspace/qwen3.8-27b-bf16"} 0.4375
+# TYPE vllm:prompt_tokens_total counter
+vllm:prompt_tokens_total{engine="0",model_name="/workspace/qwen3.8-27b-bf16"} 1.2345e+06
+vllm:prompt_tokens_created{engine="0",model_name="/workspace/qwen3.8-27b-bf16"} 1.7632e+09
+# TYPE vllm:generation_tokens_total counter
+vllm:generation_tokens_total{engine="0",model_name="/workspace/qwen3.8-27b-bf16"} 98765.0 1763200000000
+# TYPE vllm:request_success_total counter
+vllm:request_success_total{engine="0",finished_reason="stop",model_name="/workspace/qwen3.8-27b-bf16"} 40.0
+vllm:request_success_total{engine="0",finished_reason="length",model_name="/workspace/qwen3.8-27b-bf16"} 2.0
+# TYPE vllm:time_to_first_token_seconds histogram
+vllm:time_to_first_token_seconds_bucket{engine="0",le="0.5",model_name="/workspace/qwen3.8-27b-bf16"} 10.0
+vllm:time_to_first_token_seconds_bucket{engine="0",le="+Inf",model_name="/workspace/qwen3.8-27b-bf16"} 42.0
+vllm:time_to_first_token_seconds_count{engine="0",model_name="/workspace/qwen3.8-27b-bf16"} 42.0
+vllm:time_to_first_token_seconds_sum{engine="0",model_name="/workspace/qwen3.8-27b-bf16"} 31.5
+# TYPE vllm:cache_config_info gauge
+vllm:cache_config_info{block_size="16",cache_dtype="auto",enable_prefix_caching="True",gpu_memory_utilization="0.9",kv_cache_size_tokens="262144",kv_cache_max_concurrency="2.0",num_gpu_blocks="16384",note="a \"quoted\" value, with a comma and a \\ backslash"} 1.0
+vllm:lora_requests_info{running_lora_adapters="",waiting_lora_adapters=""} NaN
+vllm:no_labels_total 7
+this line is not a metric

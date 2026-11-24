@@ -1,0 +1,23 @@
+# HELP gpu:utilization_percent GPU (SM) utilization
+# TYPE gpu:utilization_percent gauge
+gpu:utilization_percent{gpu="0"} 87.0
+gpu:utilization_percent{gpu="1"} 91.0
+# TYPE gpu:memory_used_mib gauge
+gpu:memory_used_mib{gpu="0"} 90112.0
+gpu:memory_used_mib{gpu="1"} 90624.0
+gpu:memory_total_mib{gpu="0"} 97887.0
+gpu:memory_total_mib{gpu="1"} 97887.0
+gpu:power_watts{gpu="0"} 412.5
+gpu:power_watts{gpu="1"} 398.25
+gpu:power_limit_watts{gpu="0"} 600.0
+gpu:power_limit_watts{gpu="1"} 600.0
+gpu:temperature_celsius{gpu="0"} 71.0
+gpu:temperature_celsius{gpu="1"} 68.0
+gpu:sm_clock_mhz{gpu="0"} 2400.0
+gpu:sm_clock_mhz{gpu="1"} 2385.0
+gpu:pcie_rx_mb_per_second{gpu="0"} 12.0
+gpu:pcie_rx_mb_per_second{gpu="1"} 14.0
+gpu:pcie_tx_mb_per_second{gpu="0"} 3.0
+gpu:pcie_tx_mb_per_second{gpu="1"} 4.0
+# TYPE gpu:exporter_up gauge
+gpu:exporter_up 1

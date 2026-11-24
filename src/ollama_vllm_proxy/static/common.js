@@ -45,6 +45,11 @@
     return data;
   }
 
+  // Raw authenticated GET for downloads; returns the Response.
+  function rawFetch(path) {
+    return fetch("/admin/api" + path, { headers: { Authorization: "Bearer " + token }, cache: "no-store" });
+  }
+
   // Streaming GET (server-sent events over fetch, so the token stays in a header).
   // onEvent receives each parsed "data:" payload. Returns an object with close().
   function stream(path, onEvent, onEnd) {
@@ -135,5 +140,5 @@
     start();
   }
 
-  window.OVP = { api, stream, el, boot, fmtTime, logout };
+  window.OVP = { api, fetch: rawFetch, stream, el, boot, fmtTime, logout };
 })();
