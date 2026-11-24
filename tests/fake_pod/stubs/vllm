@@ -1,0 +1,84 @@
+#!PYTHON
+"""Stub vllm: `vllm --version` and `vllm serve DIR ...` running the fake OpenAI server.
+
+state/vllm_mode: ok | nofit:<limit> (refuse a larger context) | crash | open (ignore the key)
+"""
+import os
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, "STUBS")
+sys.path.insert(0, "TESTS")
+from _common import number, read, record  # noqa: E402
+
+args = sys.argv[1:]
+venv = os.environ.get("OVP_FAKE_VENV", "")
+version = (Path(venv) / ".vllm-version").read_text().strip() if venv else "0.0.0"
+if args[:1] == ["--version"]:
+    print(version)
+    sys.exit(0)
+if args[:1] != ["serve"]:
+    print(f"stub vllm: unsupported {args}", file=sys.stderr)
+    sys.exit(2)
+
+
+def value(flag: str, default: str = "") -> str:
+    # The last occurrence wins, as with argparse.
+    found = [args[i + 1] for i, a in enumerate(args[:-1]) if a == flag]
+    return found[-1] if found else default
+
+
+key = os.environ.get("VLLM_API_KEY", "")
+context = int(value("--max-model-len", "0"))
+port = int(value("--port", "8000"))
+host = value("--host", "0.0.0.0")
+served = value("--served-model-name", "model")
+soft, _ = __import__("resource").getrlimit(__import__("resource").RLIMIT_NOFILE)
+record("vllm", nofile=soft)
+mode = read("vllm_mode", "ok")
+
+
+def log(text: str) -> None:
+    print(f"INFO {time.strftime('%m-%d %H:%M:%S')} [api_server.py:1] {text}", flush=True)
+
+
+log(f"vLLM API server version {version}")
+# A real server may echo its key in the argument dump; the proxy must redact it before display.
+log(f"non-default args: {{'model_tag': '{args[1]}', 'host': '{host}', 'port': {port}, 'api_key': '{key}', "
+    f"'max_model_len': {context}, 'tensor_parallel_size': {value('--tensor-parallel-size', '1')}}}")
+log(f"Authorization: Bearer {key}")
+log(f"Loading weights from {args[1]}")
+time.sleep(number("vllm_start_delay", 0.3))
+if mode.startswith("nofit:"):
+    limit = int(mode.split(":")[1])
+    if context > limit:
+        print(f"ValueError: To serve at least one request with the models's max seq len ({context}), "
+              f"(12.21 GiB KV cache is needed, which is larger than the available KV cache memory (9.13 GiB). "
+              f"Based on the available memory, the estimated maximum model length is {limit}. Try increasing "
+              "`gpu_memory_utilization` or decreasing `max_model_len` when initializing the engine.", flush=True)
+        sys.exit(1)
+if mode == "crash":
+    print("Traceback (most recent call last):\n  File \"engine.py\", line 1, in <module>\n"
+          "torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 2.00 GiB.", flush=True)
+    sys.exit(1)
+
+import fake_vllm  # noqa: E402
+import uvicorn  # noqa: E402
+
+fake_vllm.MAX_MODEL_LEN = context
+fake_vllm.MODEL = served
+app = fake_vllm.make_app(fake_vllm.State(api_key=key, delay=0.01))
+if mode == "open":
+    inner = app
+
+    async def app(scope, receive, send):  # noqa: F811 - a server that ignores its key
+        if scope["type"] == "http":
+            scope = dict(scope, headers=[(k, v) for k, v in scope["headers"] if k != b"authorization"]
+                         + [(b"authorization", f"Bearer {key}".encode())])
+        await inner(scope, receive, send)
+
+log(f"GPU KV cache size: {context * 4} tokens")
+log("Maximum concurrency for %d tokens per request: 4.00x" % context)
+log("Application startup complete.")
+uvicorn.run(app, host=host, port=port, log_level="warning")

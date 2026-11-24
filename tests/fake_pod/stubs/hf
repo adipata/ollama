@@ -1,0 +1,41 @@
+#!PYTHON
+"""Stub hf: `hf download REPO --local-dir DIR [--revision R]` writing sparse files progressively."""
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, "STUBS")
+from _common import number, read, record  # noqa: E402
+
+args = sys.argv[1:]
+if args[:1] != ["download"] or "--local-dir" not in args:
+    print(f"stub hf: unsupported {args}", file=sys.stderr)
+    sys.exit(2)
+repo = args[1]
+target = Path(args[args.index("--local-dir") + 1])
+record("hf", env={k: v for k, v in os.environ.items()})
+if read("hf_mode", "ok") == "fail":
+    print(f"huggingface_hub.errors.GatedRepoError: 401 Client Error.\nCannot access gated repo for url "
+          f"https://huggingface.co/{repo}/resolve/main/config.json.\nAccess to model {repo} is restricted.",
+          file=sys.stderr)
+    sys.exit(1)
+try:
+    total = int(json.loads(read("hf_sizes.json", "{}")).get(repo, 262144))
+except ValueError:
+    total = 262144
+target.mkdir(parents=True, exist_ok=True)
+(target / "config.json").write_text('{"model_type": "stub"}\n')
+weights = target / "model-00001-of-00001.safetensors"
+done = weights.stat().st_size if weights.exists() else 0
+steps = int(number("hf_steps", 8))
+delay = number("hf_delay", 0.05)
+print(f"Fetching 2 files for {repo}", flush=True)
+with open(weights, "ab") as fh:
+    while done < total:
+        done = min(total, done + max(total // steps, 1))
+        fh.truncate(done)  # sparse: the apparent size grows, no disk is used
+        print(f"model-00001-of-00001.safetensors: {100 * done // total}%", flush=True)
+        time.sleep(delay)
+print(str(target))

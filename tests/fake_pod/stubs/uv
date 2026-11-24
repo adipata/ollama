@@ -1,0 +1,64 @@
+#!PYTHON
+"""Stub uv: `uv python find`, `uv venv`, `uv pip install` creating a fake environment."""
+import os
+import shutil
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, "STUBS")
+from _common import number, read, record  # noqa: E402
+
+BIN = Path(__file__).resolve().parent
+args = sys.argv[1:]
+mode = read("uv_mode", "ok")
+record("uv", env={})
+
+
+def wrapper(venv: Path, name: str) -> None:
+    path = venv / "bin" / name
+    path.write_text(f'#!/bin/sh\nOVP_FAKE_VENV="{venv}" exec "{BIN / name}" "$@"\n')
+    path.chmod(0o755)
+
+
+if args[:2] == ["python", "find"]:
+    if mode == "no_python":
+        print(f"error: No interpreter found for Python {args[2]}", file=sys.stderr)
+        sys.exit(2)
+    print(sys.executable)
+elif args[:1] == ["venv"]:
+    venv = Path(args[1])
+    version = args[args.index("--python") + 1]
+    (venv / "bin").mkdir(parents=True, exist_ok=True)
+    (venv / "lib" / f"python{version}" / "site-packages").mkdir(parents=True, exist_ok=True)
+    if not (venv / "bin" / "python").exists():
+        os.symlink(sys.executable, venv / "bin" / "python")
+    print(f"Using CPython {version}\nCreating virtual environment at: {venv}")
+elif args[:2] == ["pip", "install"]:
+    if "--no-cache" not in args:
+        print("stub uv: expected --no-cache", file=sys.stderr)
+        sys.exit(2)
+    venv = Path(args[args.index("--python") + 1]).parent.parent
+    packages = [a for a in args[2:] if not a.startswith("-") and a != args[args.index("--python") + 1]]
+    for pkg in packages:
+        if pkg.startswith("vllm"):
+            time.sleep(number("uv_delay", 0.2))
+            if mode == "fail":
+                print("  x No solution found when resolving dependencies:\n  `-> vllm could not be installed (stub failure)",
+                      file=sys.stderr)
+                sys.exit(1)
+            version = pkg.split("==")[1]
+            site = next((venv / "lib").glob("python*/site-packages"))
+            for old in site.glob("vllm-*.dist-info"):
+                shutil.rmtree(old)
+            (site / f"vllm-{version}.dist-info").mkdir()
+            (venv / ".vllm-version").write_text(version)
+            wrapper(venv, "vllm")
+        elif pkg == "huggingface_hub":
+            wrapper(venv, "hf")
+    print(f"Resolved {len(packages) * 40} packages in 1.02s\nInstalled {len(packages) * 40} packages in 310ms")
+    for pkg in packages:
+        print(f" + {pkg}")
+else:
+    print(f"stub uv: unsupported {args}", file=sys.stderr)
+    sys.exit(2)

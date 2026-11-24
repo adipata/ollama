@@ -1,0 +1,14 @@
+#!PYTHON
+"""Stub df: reports state/df_avail_kb when present, else runs the real df."""
+import os
+import sys
+
+sys.path.insert(0, "STUBS")
+from _common import read  # noqa: E402
+
+avail = read("df_avail_kb")
+if avail:
+    print("Filesystem 1024-blocks Used Available Capacity Mounted on")
+    print(f"overlay {int(avail) * 2} {avail} {avail} 50% /")
+    sys.exit(0)
+os.execv("/usr/bin/df", ["df", *sys.argv[1:]])

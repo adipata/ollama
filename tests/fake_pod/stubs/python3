@@ -1,0 +1,12 @@
+#!PYTHON
+"""Stub python3 (the pod's system interpreter): fails when state/python3_fail exists."""
+import os
+import sys
+
+sys.path.insert(0, "STUBS")
+from _common import STATE  # noqa: E402
+
+if (STATE / "python3_fail").exists():
+    print("python3: stub failure", file=sys.stderr)
+    sys.exit(1)
+os.execv(sys.executable, [sys.executable, *sys.argv[1:]])

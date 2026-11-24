@@ -1,0 +1,8 @@
+#!PYTHON
+"""Stub curl: reachable unless state/offline exists."""
+import sys
+
+sys.path.insert(0, "STUBS")
+from _common import STATE  # noqa: E402
+
+sys.exit(7 if (STATE / "offline").exists() else 0)

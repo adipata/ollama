@@ -1,0 +1,18 @@
+#!PYTHON
+"""Stub nvidia-smi: prints the canned CSV in state/gpus.csv for the fit-plan query."""
+import sys
+
+sys.path.insert(0, "STUBS")
+from _common import STATE  # noqa: E402
+
+args = sys.argv[1:]
+if any(a.startswith("--query-gpu=index,name,memory.total,compute_cap") for a in args) and not any(
+        a.startswith("-l") for a in args):
+    try:
+        sys.stdout.write((STATE / "gpus.csv").read_text())
+    except OSError:
+        print("NVIDIA-SMI has failed because it couldn't communicate with the NVIDIA driver.")
+        sys.exit(9)
+    sys.exit(0)
+print("stub nvidia-smi: unsupported query")
+sys.exit(1)
